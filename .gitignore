@@ -1,2 +1,14 @@
 zig-out/
 .zig-cache/
+
+# OS generated files
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Archives
+*.tar.gz
+*.zip
+*.tar
+*.gz

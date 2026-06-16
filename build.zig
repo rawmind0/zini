@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const version = "0.1.0";
+const name = "zini";
 
 pub fn build(b: *std.Build) void {
     // zini only runs on Linux, so when building from a non-Linux host we default
@@ -10,9 +10,17 @@ pub fn build(b: *std.Build) void {
     });
     const optimize = b.standardOptimizeOption(.{});
 
+    // Built-in profiler: default on in Debug, off otherwise; `-Dprofile` overrides.
+    const profile = b.option(bool, "profile", "Build the in-process profiler into the binary") orelse
+        (optimize == .Debug);
+    const version = b.option([]const u8, "version", "application version string") orelse "0.0.0";
+
     // Build-time options (exposed to the code as `@import("build_options")`).
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
+    options.addOption(bool, "profile", profile);
+
+    const license = b.path("LICENSE");
 
     // Primary executable.
     const exe_mod = b.createModule(.{
@@ -24,10 +32,10 @@ pub fn build(b: *std.Build) void {
         .strip = optimize != .Debug,
     });
     exe_mod.addOptions("build_options", options);
-    exe_mod.addAnonymousImport("license", .{ .root_source_file = b.path("LICENSE") });
+    exe_mod.addAnonymousImport("license", .{ .root_source_file = license });
 
     const exe = b.addExecutable(.{
-        .name = "zini",
+        .name = name,
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
@@ -36,29 +44,33 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Build and run zini");
+    const run_step = b.step("run", "Build and run app");
     run_step.dependOn(&run_cmd.step);
 
-    // `zig build test` — unit tests live in src/zini.zig. These cover the pure
-    // logic (arg/env parsing, bitfield, signal-name lookup) and must *run*, so we
-    // build them for the host (native) target. The exercised paths never invoke a
-    // real Linux syscall, so this is safe to run on a non-Linux dev machine too.
+    // `zig build test` — unit tests aggregated in src/tests.zig. Built for the
+    // host (native) target so they run on a non-Linux dev machine too; the
+    // exercised code paths never issue a real Linux syscall (silent Logger).
     const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/zini.zig"),
+        .root_source_file = b.path("src/tests.zig"),
         .target = b.resolveTargetQuery(.{}),
         .optimize = optimize,
         .single_threaded = true,
         .link_libc = false,
     });
     test_mod.addOptions("build_options", options);
-    test_mod.addAnonymousImport("license", .{ .root_source_file = b.path("LICENSE") });
+    test_mod.addAnonymousImport("license", .{ .root_source_file = license });
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
     // `zig build release` — static ReleaseSmall binaries for both Linux arches.
-    const release_step = b.step("release", "Build static release binaries (x86_64 + aarch64 Linux)");
+    // The profiler is always compiled out of release builds.
+    const rel_options = b.addOptions();
+    rel_options.addOption([]const u8, "version", version);
+    rel_options.addOption(bool, "profile", false);
+
+    const release_step = b.step("release", "Build static release linux binaries (x86_64 + aarch64)");
     const arches = [_]std.Target.Cpu.Arch{ .x86_64, .aarch64 };
     for (arches) |arch| {
         const rt = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux });
@@ -70,14 +82,19 @@ pub fn build(b: *std.Build) void {
             .link_libc = false,
             .strip = true,
         });
-        rel_mod.addOptions("build_options", options);
-        rel_mod.addAnonymousImport("license", .{ .root_source_file = b.path("LICENSE") });
+        rel_mod.addOptions("build_options", rel_options);
+        rel_mod.addAnonymousImport("license", .{ .root_source_file = license });
         const rel_exe = b.addExecutable(.{
-            .name = "zini",
+            .name = name,
             .root_module = rel_mod,
         });
+        const docker_arch = switch (arch) {
+            .x86_64 => "amd64",
+            .aarch64 => "arm64",
+            else => "",
+        };
         const install = b.addInstallArtifact(rel_exe, .{
-            .dest_sub_path = b.fmt("zini-{s}-linux", .{@tagName(arch)}),
+            .dest_sub_path = b.fmt("{s}-linux-{s}", .{ name, docker_arch }),
         });
         release_step.dependOn(&install.step);
     }
