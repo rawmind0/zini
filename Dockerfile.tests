@@ -1,0 +1,33 @@
+# Test image: the production image plus everything the e2e suites need baked in
+# — the debug/profiler binary (for bench), the in-container scripts, and a
+# consistent set of fixtures. Built by `make docker`; driven by `make e2e-test`.
+#
+# Keeps ENTRYPOINT ["/usr/local/bin/zini", "--"] from the base and leaves CMD
+# empty, so each `docker run` supplies the child command (a /scripts/* program)
+# and watch options come from ZINI_* env vars.
+
+ARG BASE_IMAGE=rawmind/zini
+FROM ${BASE_IMAGE}
+
+# Debug build: unstripped, profiler compiled in (see `make bench`).
+COPY zig-out/bin/zini /usr/local/bin/zini-debug
+
+# In-container scripts: test children + the integration suite.
+COPY test/scripts/ /scripts/
+RUN chmod +x /scripts/*.sh /usr/local/bin/zini-debug
+
+# Consistent fixtures used by the watch suite. Each `docker run` gets a fresh
+# copy (a new container layer), so tests can mutate them freely.
+#   /fix/file              regular file
+#   /fix/dir/              directory
+#   /fix/link    -> file   symlink to a file
+#   /fix/linkdir -> dir    symlink to a directory
+#   /fix/k8s/cfg -> ..data/cfg -> ..2024a/cfg   kubernetes-style mount
+RUN set -eu; \
+    mkdir -p /fix/dir /fix/k8s/..2024a; \
+    echo v1 > /fix/file; \
+    echo v1 > /fix/k8s/..2024a/cfg; \
+    ln -s file       /fix/link; \
+    ln -s dir        /fix/linkdir; \
+    ln -s ..2024a    /fix/k8s/..data; \
+    ln -s ..data/cfg /fix/k8s/cfg
