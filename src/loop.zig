@@ -24,7 +24,10 @@ pub const EventLoop = struct {
         const signal_fd: i32 = @intCast(sfd);
 
         const efd = linux.epoll_create1(EPOLL.CLOEXEC);
-        if (sys.errno(efd) != .SUCCESS) return error.EventLoopInit;
+        if (sys.errno(efd) != .SUCCESS) {
+            _ = linux.close(signal_fd);
+            return error.EventLoopInit;
+        }
         const epoll_fd: i32 = @intCast(efd);
 
         var ev = linux.epoll_event{ .events = EPOLL.IN, .data = .{ .fd = signal_fd } };
@@ -40,9 +43,9 @@ pub const EventLoop = struct {
         _ = linux.close(self.epoll_fd);
     }
 
-    /// Add another readable fd (e.g. an inotify fd) to the epoll set. The fd is
-    /// stored in `data.fd` so the caller can tell sources apart in `wait`.
-    pub fn addInotify(self: *EventLoop, fd: i32) InitError!void {
+    /// Add a readable fd (e.g. an inotify or signalfd) to the epoll set. The fd
+    /// is stored in `data.fd` so the caller can tell sources apart in `wait`.
+    pub fn addFd(self: *EventLoop, fd: i32) InitError!void {
         var ev = linux.epoll_event{ .events = EPOLL.IN, .data = .{ .fd = fd } };
         if (sys.errno(linux.epoll_ctl(self.epoll_fd, EPOLL.CTL_ADD, fd, &ev)) != .SUCCESS) {
             return error.EventLoopInit;

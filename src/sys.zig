@@ -2,6 +2,7 @@
 //! Shared by the rest of zini so the call sites stay readable.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 
 pub const E = linux.E;
@@ -97,4 +98,23 @@ fn execStatus(e: E) u8 {
         .ACCES => 126,
         else => 1,
     };
+}
+
+// --- Tests -------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "monotonicNanos returns nonzero" {
+    if (builtin.target.os.tag != .linux) return error.SkipZigTest;
+    try testing.expect(monotonicNanos() > 0);
+}
+
+test "errno maps SUCCESS correctly" {
+    try testing.expectEqual(E.SUCCESS, errno(0));
+}
+
+test "execStatus maps errors to expected codes" {
+    try testing.expectEqual(@as(u8, 127), execStatus(.NOENT));
+    try testing.expectEqual(@as(u8, 126), execStatus(.ACCES));
+    try testing.expectEqual(@as(u8, 1), execStatus(.IO));
 }
