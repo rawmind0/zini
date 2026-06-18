@@ -55,19 +55,19 @@ pub const Watcher = struct {
 
     /// Watch `path` (file, directory, or symlink). Must exist now. `path` must
     /// outlive the watcher (it borrows argv memory).
-    pub fn add(self: *Watcher, logger: log.Logger, path: []const u8) Error!void {
+    pub fn add(self: *Watcher, path: []const u8) Error!void {
         if (self.count >= MAX_WATCHES) return error.TooManyWatches;
         const wd = addWatch(self.fd, path) catch {
-            logger.fatal("Failed to watch '{s}' (does it exist?)", .{path});
+            log.logError("Failed to watch '{s}' (does it exist?)", .{path});
             return error.AddWatchFailed;
         };
         self.entries[self.count] = .{ .wd = wd, .path = path };
         self.count += 1;
-        logger.trace("Watching '{s}'", .{path});
+        std.log.debug("Watching '{s}'", .{path});
     }
 
     /// Read all pending events; returns true if any watched target changed.
-    pub fn drain(self: *Watcher, logger: log.Logger) bool {
+    pub fn drain(self: *Watcher) bool {
         var changed = false;
         var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
         while (true) {
@@ -88,14 +88,14 @@ pub const Watcher = struct {
                 // The watched inode itself went away (atomic replace / rotation):
                 // re-add the watch on the same path (re-follows symlinks).
                 if (ev.mask & (IN.IGNORED | IN.DELETE_SELF | IN.MOVE_SELF) != 0) {
-                    self.rewatch(logger, ev.wd);
+                    self.rewatch(ev.wd);
                 }
                 off += @sizeOf(linux.inotify_event) + ev.len;
             }
         }
     }
 
-    fn rewatch(self: *Watcher, logger: log.Logger, dead_wd: i32) void {
+    fn rewatch(self: *Watcher, dead_wd: i32) void {
         for (self.entries[0..self.count]) |*e| {
             if (e.wd != dead_wd) continue;
             if (addWatch(self.fd, e.path)) |wd| {
@@ -105,7 +105,7 @@ pub const Watcher = struct {
                 // non-atomic update). Keep the entry and retry on the next reload.
                 e.wd = -1;
                 self.failed = true;
-                logger.warn("Watch on '{s}' broke; will retry on next reload", .{e.path});
+                std.log.warn("Watch on '{s}' broke; will retry on next reload", .{e.path});
             }
             return;
         }
@@ -114,14 +114,14 @@ pub const Watcher = struct {
     /// Re-add any broken watches. Called when a reload happens, so a watch lost
     /// to a non-atomic update is restored once the path is valid again. A no-op
     /// (and free) when nothing is broken.
-    pub fn retryFailed(self: *Watcher, logger: log.Logger) void {
+    pub fn retryFailed(self: *Watcher) void {
         if (!self.failed) return;
         var still_failed = false;
         for (self.entries[0..self.count]) |*e| {
             if (e.wd >= 0) continue;
             if (addWatch(self.fd, e.path)) |wd| {
                 e.wd = wd;
-                logger.trace("Re-established watch on '{s}'", .{e.path});
+                std.log.debug("Re-established watch on '{s}'", .{e.path});
             } else |_| {
                 still_failed = true;
             }

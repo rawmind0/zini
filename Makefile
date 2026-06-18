@@ -1,6 +1,8 @@
-TAG_COMMIT := $(shell git rev-list --abbrev-commit --tags --max-count=1)
-TAG := $(shell git describe --abbrev=0 --tags ${TAG_COMMIT} 2>/dev/null || echo 0.0.0)
+TAG_COMMIT := $(shell git rev-list --abbrev-commit --tags --max-count=1 HEAD)
+TAG := $(shell git describe --tags --dirty="-dirty" 2>/dev/null || echo 0.0.0)
+TAG_DIRTY=$(shell git status --porcelain --untracked-files=no)
 VERSION := $(TAG:v%=%)
+
 
 BIN_OUTPUT ?= zig-out/bin
 BIN_FILES ?= "zini-linux-amd64 zini-linux-arm64"
@@ -21,7 +23,7 @@ release: ## Build static ReleaseSmall binaries for x86_64 + aarch64 Linux
 	cd - > /dev/null
 
 test: ## Run unit tests
-	$(ZIG) build test
+	$(ZIG) build test --summary all
 
 fmt: ## Format all Zig sources
 	$(ZIG) fmt build.zig src

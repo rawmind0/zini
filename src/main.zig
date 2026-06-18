@@ -11,18 +11,26 @@ comptime {
     }
 }
 
+/// Route `std.log` through `ziniLog`: `.debug` lets every level reach it, then it
+/// gates at runtime by `log.verbosity` and formats like std's default (stderr).
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = log.ziniLog,
+};
+
 pub fn main(init: std.process.Init.Minimal) u8 {
     const argv = init.args.vector;
     const environ = init.environ.block.slice;
 
     var cfg = options.Config{};
-    const boot_logger = log.Logger{ .verbosity = options.DEFAULT_VERBOSITY };
 
-    const start = switch (cfg.parse(boot_logger, argv)) {
+    const start = switch (cfg.parse(argv)) {
         .exit => |code| return code,
         .run => |idx| idx,
     };
+
     cfg.parseEnv(environ);
+    log.verbosity = cfg.verbosity;
 
     var zini = Zini.init(cfg, environ);
     return zini.run(argv[start..]);

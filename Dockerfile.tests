@@ -31,3 +31,5 @@ RUN set -eu; \
     ln -s dir        /fix/linkdir; \
     ln -s ..2024a    /fix/k8s/..data; \
     ln -s ..data/cfg /fix/k8s/cfg
+
+ENTRYPOINT ["/usr/local/bin/zini", "-vv", "--"]

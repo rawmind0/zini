@@ -44,7 +44,6 @@ const Reload = enum {
 
 pub const Zini = struct {
     cfg: options.Config,
-    logger: log.Logger,
     environ: [:null]const ?[*:0]const u8,
     profiler: prof.Profiler = .{},
 
@@ -66,7 +65,6 @@ pub const Zini = struct {
     pub fn init(cfg: options.Config, environ: [:null]const ?[*:0]const u8) Zini {
         return .{
             .cfg = cfg,
-            .logger = .{ .verbosity = cfg.verbosity },
             .environ = environ,
         };
     }
@@ -79,7 +77,7 @@ pub const Zini = struct {
 
         // The event loop's signalfd must be created after signals are blocked.
         self.loop = EventLoop.init(&self.parent_mask) catch {
-            self.logger.fatal("Failed to set up event loop", .{});
+            log.logError("Failed to set up event loop", .{});
             return 1;
         };
         defer self.loop.deinit();
@@ -87,15 +85,15 @@ pub const Zini = struct {
         // Optional file-watch feature: set up inotify and register watches.
         if (self.cfg.watchEnabled()) {
             self.watcher = Watcher.init() catch {
-                self.logger.fatal("Failed to set up file watcher", .{});
+                log.logError("Failed to set up file watcher", .{});
                 return 1;
             };
             self.loop.addInotify(self.watcher.fd) catch {
-                self.logger.fatal("Failed to register file watcher", .{});
+                log.logError("Failed to register file watcher", .{});
                 return 1;
             };
             for (self.cfg.watch_paths[0..self.cfg.watch_count]) |path| {
-                self.watcher.add(self.logger, path) catch return 1;
+                self.watcher.add(path) catch return 1;
             }
         }
         defer if (self.cfg.watchEnabled()) self.watcher.deinit();
@@ -104,23 +102,21 @@ pub const Zini = struct {
         if (self.cfg.parent_death_signal != 0) {
             const rc = linux.prctl(@intFromEnum(PR.SET_PDEATHSIG), self.cfg.parent_death_signal, 0, 0, 0);
             if (sys.errno(rc) != .SUCCESS) {
-                self.logger.fatal("Failed to set up parent death signal", .{});
+                log.logError("Failed to set up parent death signal", .{});
                 return 1;
             }
         }
 
         self.registerSubreaper() catch return 1;
-        self.reaperCheck();
+        reaperCheck();
         self.spawn(child_argv) catch return 1;
-
-        self.logger.info("Zini runnung", .{});
 
         self.profiler.start();
         var child_exitcode: i32 = -1; // -1 = still running
         while (true) {
             if (!self.tick(&child_exitcode)) return 1;
             if (child_exitcode != -1) {
-                self.logger.trace("Exiting: child has exited", .{});
+                std.log.debug("Exiting: child has exited", .{});
                 self.profiler.dump();
                 return @intCast(child_exitcode);
             }
@@ -135,7 +131,7 @@ pub const Zini = struct {
         self.profiler.beforeWait();
         const n = self.loop.wait(&events, self.computeTimeout()) catch {
             self.profiler.afterWait(.event);
-            self.logger.fatal("epoll_wait failed", .{});
+            log.logError("epoll_wait failed", .{});
             return false;
         };
 
@@ -147,7 +143,7 @@ pub const Zini = struct {
                 if (ev.data.fd == self.loop.signal_fd) {
                     self.drainSignalfd() catch return false;
                 } else if (self.cfg.watchEnabled() and ev.data.fd == self.watcher.fd) {
-                    if (self.watcher.drain(self.logger)) self.onWatchChange();
+                    if (self.watcher.drain()) self.onWatchChange();
                 }
             }
         }
@@ -171,7 +167,7 @@ pub const Zini = struct {
     /// already in progress.
     fn onWatchChange(self: *Zini) void {
         if (self.reload == .stopping) return;
-        self.logger.info("watched path changed; reload scheduled in {d}ms", .{self.cfg.debounce_ms});
+        std.log.info("watched path changed; reload scheduled in {d}ms", .{self.cfg.debounce_ms});
         self.reload = .debouncing;
         self.deadline_ns = sys.monotonicNanos() + self.cfg.debounce_ms * 1_000_000;
     }
@@ -185,16 +181,16 @@ pub const Zini = struct {
             .debouncing => {
                 // A reload is happening: re-establish any watches that broke
                 // during a non-atomic update (the path is likely valid again now).
-                self.watcher.retryFailed(self.logger);
+                self.watcher.retryFailed();
                 switch (self.cfg.on_change) {
                     .signal => {
-                        self.logger.info("reloading child via {s}", .{signals.name(self.cfg.reload_signal)});
+                        std.log.info("reloading child via {s}", .{signals.name(self.cfg.reload_signal)});
                         self.killChild(self.cfg.reload_signal);
                         self.reload = .running;
                         self.deadline_ns = 0;
                     },
                     .restart => {
-                        self.logger.info("restarting child ({s}, grace {d}ms)", .{ signals.name(self.cfg.stop_signal), self.cfg.restart_grace_ms });
+                        std.log.info("restarting child ({s}, grace {d}ms)", .{ signals.name(self.cfg.stop_signal), self.cfg.restart_grace_ms });
                         self.killChild(self.cfg.stop_signal);
                         self.reload = .stopping;
                         self.deadline_ns = sys.monotonicNanos() + self.cfg.restart_grace_ms * 1_000_000;
@@ -202,7 +198,7 @@ pub const Zini = struct {
                 }
             },
             .stopping => {
-                self.logger.warn("child did not exit within grace period; sending SIGKILL", .{});
+                std.log.warn("child did not exit within grace period; sending SIGKILL", .{});
                 self.killChild(@intFromEnum(SIG.KILL));
                 self.deadline_ns = 0; // now wait for the reap → respawn
             },
@@ -214,8 +210,8 @@ pub const Zini = struct {
         const target: linux.pid_t = if (self.cfg.kill_process_group != 0) -self.child_pid else self.child_pid;
         posix.kill(target, @enumFromInt(signo)) catch |err| switch (err) {
             error.ProcessNotFound => {},
-            error.PermissionDenied => self.logger.warn("kill failed: permission denied", .{}),
-            else => self.logger.warn("kill failed (unexpected error)", .{}),
+            error.PermissionDenied => std.log.warn("kill failed: permission denied", .{}),
+            else => std.log.warn("kill failed (unexpected error)", .{}),
         };
     }
 
@@ -230,7 +226,7 @@ pub const Zini = struct {
                 .AGAIN => return, // drained (signalfd is non-blocking)
                 .INTR => continue,
                 else => {
-                    self.logger.fatal("read(signalfd) failed", .{});
+                    log.logError("read(signalfd) failed", .{});
                     return error.Fatal;
                 },
             }
@@ -238,7 +234,7 @@ pub const Zini = struct {
             if (count == 0) return;
             for (buf[0..count]) |si| {
                 if (si.signo == @intFromEnum(SIG.CHLD)) {
-                    self.logger.debug("Received SIGCHLD", .{});
+                    std.log.debug("Received SIGCHLD", .{});
                 } else {
                     try self.forwardSignal(si.signo);
                 }
@@ -247,16 +243,16 @@ pub const Zini = struct {
     }
 
     fn forwardSignal(self: *Zini, signo: u32) Error!void {
-        self.logger.debug("Passing signal: '{s}'", .{signals.name(signo)});
+        std.log.debug("Passing signal: '{s}'", .{signals.name(signo)});
         const target: linux.pid_t = if (self.cfg.kill_process_group != 0) -self.child_pid else self.child_pid;
         posix.kill(target, @enumFromInt(signo)) catch |err| switch (err) {
-            error.ProcessNotFound => self.logger.warn("Child was dead when forwarding signal", .{}),
+            error.ProcessNotFound => std.log.warn("Child was dead when forwarding signal", .{}),
             error.PermissionDenied => {
-                self.logger.fatal("Permission denied when forwarding signal", .{});
+                log.logError("Permission denied when forwarding signal", .{});
                 return error.Fatal;
             },
             else => {
-                self.logger.fatal("Unexpected error when forwarding signal", .{});
+                log.logError("Unexpected error when forwarding signal", .{});
                 return error.Fatal;
             },
         };
@@ -266,17 +262,17 @@ pub const Zini = struct {
     fn reapZombies(self: *Zini, child_exitcode: *i32) Error!void {
         while (true) {
             const maybe = sys.reapOne() catch {
-                self.logger.fatal("Error while waiting for pids", .{});
+                log.logError("Error while waiting for pids", .{});
                 return error.Fatal;
             };
             const r = maybe orelse break;
             self.profiler.zombieReaped();
-            self.logger.debug("Reaped child with pid: '{d}'", .{r.pid});
+            std.log.debug("Reaped child with pid: '{d}'", .{r.pid});
 
             if (r.pid == self.child_pid) {
                 // Intentional restart: respawn instead of exiting.
                 if (self.reload == .stopping) {
-                    self.logger.info("child stopped for reload; respawning", .{});
+                    std.log.info("child stopped for reload; respawning", .{});
                     self.reload = .running;
                     self.deadline_ns = 0;
                     self.spawn(self.child_argv) catch return error.Fatal;
@@ -285,21 +281,21 @@ pub const Zini = struct {
 
                 if (linux.W.IFEXITED(r.status)) {
                     const es = linux.W.EXITSTATUS(r.status);
-                    self.logger.info("Main child exited normally (with status '{d}')", .{es});
+                    std.log.info("Main child exited normally (with status '{d}')", .{es});
                     child_exitcode.* = es;
                 } else if (linux.W.IFSIGNALED(r.status)) {
                     const term = linux.W.TERMSIG(r.status);
-                    self.logger.info("Main child exited with signal (with signal '{s}')", .{signals.name(@intFromEnum(term))});
+                    std.log.info("Main child exited with signal (with signal '{s}')", .{signals.name(@intFromEnum(term))});
                     child_exitcode.* = 128 + @as(i32, @intCast(@intFromEnum(term)));
                 } else {
-                    self.logger.fatal("Main child exited for unknown reason", .{});
+                    log.logError("Main child exited for unknown reason", .{});
                     return error.Fatal;
                 }
 
                 child_exitcode.* = @mod(child_exitcode.*, 256);
                 if (self.cfg.expect_status.isSet(@intCast(child_exitcode.*))) child_exitcode.* = 0;
             } else if (self.cfg.warn_on_reap != 0) {
-                self.logger.warn("Reaped zombie process with pid={d}", .{r.pid});
+                std.log.warn("Reaped zombie process with pid={d}", .{r.pid});
             }
         }
     }
@@ -308,19 +304,19 @@ pub const Zini = struct {
         if (self.cfg.subreaper == 0) return;
         const rc = linux.prctl(@intFromEnum(PR.SET_CHILD_SUBREAPER), 1, 0, 0, 0);
         switch (sys.errno(rc)) {
-            .SUCCESS => self.logger.trace("Registered as child subreaper", .{}),
+            .SUCCESS => std.log.debug("Registered as child subreaper", .{}),
             .INVAL => {
-                self.logger.fatal("PR_SET_CHILD_SUBREAPER is unavailable on this platform. Are you using Linux >= 3.4?", .{});
+                log.logError("PR_SET_CHILD_SUBREAPER is unavailable on this platform. Are you using Linux >= 3.4?", .{});
                 return error.Fatal;
             },
             else => |e| {
-                self.logger.fatal("Failed to register as child subreaper: {s}", .{@tagName(e)});
+                log.logError("Failed to register as child subreaper: {s}", .{@tagName(e)});
                 return error.Fatal;
             },
         }
     }
 
-    fn reaperCheck(self: *Zini) void {
+    fn reaperCheck() void {
         if (linux.getpid() == 1) return;
 
         var bit: i32 = 0;
@@ -328,39 +324,39 @@ pub const Zini = struct {
         if (sys.errno(rc) == .SUCCESS) {
             if (bit == 1) return;
         } else {
-            self.logger.debug("Failed to read child subreaper attribute", .{});
+            std.log.debug("Failed to read child subreaper attribute", .{});
         }
-        self.logger.warn("{s}", .{reaper_warning});
+        std.log.warn("{s}", .{reaper_warning});
     }
 
     /// fork() then, in the child, isolate + restore signals + exec. The parent
     /// records the child pid.
     fn spawn(self: *Zini, child_argv: []const [*:0]const u8) Error!void {
         const pid = sys.fork() catch {
-            self.logger.fatal("fork failed", .{});
+            log.logError("fork failed", .{});
             return error.Fatal;
         };
 
         if (pid == 0) {
-            if (!self.isolateChild()) std.process.exit(1);
+            if (!isolateChild()) std.process.exit(1);
             self.sigstate.restore();
             std.process.exit(self.execChild(child_argv));
         }
 
         self.child_pid = pid;
-        self.logger.info("Spawned child process '{s}' with pid '{d}'", .{ child_argv[0], pid });
+        std.log.info("Spawned child process '{s}' with pid '{d}'", .{ child_argv[0], pid });
     }
 
-    fn isolateChild(self: *Zini) bool {
+    fn isolateChild() bool {
         if (sys.errno(linux.setpgid(0, 0)) != .SUCCESS) {
-            self.logger.fatal("setpgid failed", .{});
+            log.logError("setpgid failed", .{});
             return false;
         }
         // Make the new group the tty foreground group if there is a tty;
         // any failure just means there's no controlling tty — proceed.
         const pgrp: linux.pid_t = @intCast(linux.getpgid(0));
         posix.tcsetpgrp(0, pgrp) catch {
-            self.logger.debug("tcsetpgrp failed (ok to proceed if there is no tty)", .{});
+            std.log.debug("tcsetpgrp failed (ok to proceed if there is no tty)", .{});
         };
         return true;
     }
@@ -369,7 +365,7 @@ pub const Zini = struct {
     fn execChild(self: *Zini, child_argv: []const [*:0]const u8) u8 {
         var argv_buf: [1024]?[*:0]const u8 = undefined;
         if (child_argv.len + 1 > argv_buf.len) {
-            self.logger.fatal("Too many arguments", .{});
+            log.logError("Too many arguments", .{});
             return 1;
         }
         for (child_argv, 0..) |a, idx| argv_buf[idx] = a;
@@ -380,7 +376,7 @@ pub const Zini = struct {
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
         const r = sys.execvp(argvZ, self.environ.ptr, path_env);
-        self.logger.fatal("exec {s} failed: {s}", .{ std.mem.span(child_argv[0]), @tagName(r.err) });
+        log.logError("exec {s} failed: {s}", .{ std.mem.span(child_argv[0]), @tagName(r.err) });
         return r.status;
     }
 };

@@ -9,6 +9,7 @@ const build_options = @import("build_options");
 const log = @import("log.zig");
 const signals = @import("signals.zig");
 const watcher = @import("watcher.zig");
+const sys = @import("sys.zig");
 
 const SIG = linux.SIG;
 
@@ -67,14 +68,17 @@ pub const Config = struct {
 
     /// getopt-like parser for "p:hvwgle:s": clustered short flags (`-vv`, `-vs`),
     /// attached (`-pSIGKILL`) or separate (`-p SIGKILL`) option-args, and `--`.
-    pub fn parse(self: *Config, logger: log.Logger, argv: []const [*:0]const u8) ParseResult {
+    pub fn parse(self: *Config, argv: []const [*:0]const u8) ParseResult {
         if (argv.len == 0) return .{ .exit = 1 };
         const name = argv[0];
 
-        // --version is honored only when it is the sole argument.
-        if (argv.len == 2 and (std.mem.eql(u8, std.mem.span(argv[1]), "--version") or std.mem.eql(u8, std.mem.span(argv[1]), "-v"))) {
-            logger.print(1, "{s}\n", .{VERSION_STRING});
-            return .{ .exit = 0 };
+        // --version / -v is honored only when it is the sole argument.
+        if (argv.len == 2) {
+            const a = std.mem.span(argv[1]);
+            if (std.mem.eql(u8, a, "--version") or std.mem.eql(u8, a, "-v")) {
+                writeVersion();
+                return .{ .exit = 0 };
+            }
         }
 
         var i: usize = 1;
@@ -90,7 +94,7 @@ pub const Config = struct {
 
             // Long options ("--name" / "--name=value").
             if (arg[1] == '-') {
-                switch (self.parseLong(logger, name, arg[2..], argv, &i)) {
+                switch (self.parseLong(name, arg[2..], argv, &i)) {
                     .ok => continue :outer,
                     .fail => return .{ .exit = 1 },
                 }
@@ -100,7 +104,7 @@ pub const Config = struct {
             while (j < arg.len) : (j += 1) {
                 switch (arg[j]) {
                     'h' => {
-                        printUsage(logger, name, 1);
+                        writeUsage(name, 1);
                         return .{ .exit = 0 };
                     },
                     's' => self.subreaper += 1,
@@ -108,7 +112,7 @@ pub const Config = struct {
                     'w' => self.warn_on_reap += 1,
                     'g' => self.kill_process_group += 1,
                     'l' => {
-                        logger.write(1, LICENSE_TEXT);
+                        writeLicense();
                         return .{ .exit = 0 };
                     },
                     'p', 'e', 'W' => |c| {
@@ -119,23 +123,23 @@ pub const Config = struct {
                         } else {
                             i += 1;
                             if (i >= argv.len) {
-                                printUsage(logger, name, 2);
+                                writeUsage(name, 2);
                                 return .{ .exit = 1 };
                             }
                             optarg = std.mem.span(argv[i]);
                         }
                         switch (c) {
                             'p' => if (!self.setPdeathsig(optarg)) {
-                                logger.fatal("Not a valid option for -p: {s}", .{optarg});
+                                log.logError("not a valid signal for -p: {s}", .{optarg});
                                 return .{ .exit = 1 };
                             },
                             'e' => if (!self.addExpectStatus(optarg)) {
-                                logger.fatal("Not a valid option for -e: {s}", .{optarg});
+                                log.logError("not a valid exit code for -e: {s}", .{optarg});
                                 return .{ .exit = 1 };
                             },
                             'W' => {
                                 if (self.watch_count >= watcher.MAX_WATCHES) {
-                                    logger.fatal("too many -W/--watch paths (max {d})", .{watcher.MAX_WATCHES});
+                                    log.logError("too many -W/--watch paths (max {d})", .{watcher.MAX_WATCHES});
                                     return .{ .exit = 1 };
                                 }
                                 self.watch_paths[self.watch_count] = optarg;
@@ -146,7 +150,7 @@ pub const Config = struct {
                         continue :outer;
                     },
                     else => {
-                        printUsage(logger, name, 2);
+                        writeUsage(name, 2);
                         return .{ .exit = 1 };
                     },
                 }
@@ -154,7 +158,7 @@ pub const Config = struct {
         }
 
         if (i >= argv.len) {
-            printUsage(logger, name, 2); // user forgot to provide a program
+            writeUsage(name, 2); // user forgot to provide a program
             return .{ .exit = 1 };
         }
         return .{ .run = i };
@@ -207,7 +211,6 @@ pub const Config = struct {
     /// token via `i` when the value isn't given inline with `=`.
     fn parseLong(
         self: *Config,
-        logger: log.Logger,
         name: [*:0]const u8,
         body: []const u8,
         argv: []const [*:0]const u8,
@@ -219,18 +222,18 @@ pub const Config = struct {
 
         if (std.mem.eql(u8, opt, "watch")) {
             const v = longValue(inline_val, argv, i) orelse {
-                logger.fatal("--watch requires a PATH", .{});
+                log.logError("--watch requires a PATH", .{});
                 return .fail;
             };
             if (self.watch_count >= watcher.MAX_WATCHES) {
-                logger.fatal("too many --watch paths (max {d})", .{watcher.MAX_WATCHES});
+                log.logError("too many --watch paths (max {d})", .{watcher.MAX_WATCHES});
                 return .fail;
             }
             self.watch_paths[self.watch_count] = v;
             self.watch_count += 1;
         } else if (std.mem.eql(u8, opt, "on-change")) {
             const v = longValue(inline_val, argv, i) orelse {
-                logger.fatal("--on-change requires restart|signal", .{});
+                log.logError("--on-change requires restart|signal", .{});
                 return .fail;
             };
             if (std.mem.eql(u8, v, "restart")) {
@@ -238,49 +241,49 @@ pub const Config = struct {
             } else if (std.mem.eql(u8, v, "signal")) {
                 self.on_change = .signal;
             } else {
-                logger.fatal("--on-change must be 'restart' or 'signal', got '{s}'", .{v});
+                log.logError("--on-change must be 'restart' or 'signal', got '{s}'", .{v});
                 return .fail;
             }
         } else if (std.mem.eql(u8, opt, "stop-signal")) {
             const v = longValue(inline_val, argv, i) orelse {
-                logger.fatal("--stop-signal requires a SIGNAL", .{});
+                log.logError("--stop-signal requires a SIGNAL", .{});
                 return .fail;
             };
             self.stop_signal = signals.byName(v) orelse {
-                logger.fatal("invalid --stop-signal: {s}", .{v});
+                log.logError("invalid --stop-signal: {s}", .{v});
                 return .fail;
             };
         } else if (std.mem.eql(u8, opt, "reload-signal")) {
             const v = longValue(inline_val, argv, i) orelse {
-                logger.fatal("--reload-signal requires a SIGNAL", .{});
+                log.logError("--reload-signal requires a SIGNAL", .{});
                 return .fail;
             };
             self.reload_signal = signals.byName(v) orelse {
-                logger.fatal("invalid --reload-signal: {s}", .{v});
+                log.logError("invalid --reload-signal: {s}", .{v});
                 return .fail;
             };
         } else if (std.mem.eql(u8, opt, "restart-grace")) {
             const v = longValue(inline_val, argv, i) orelse {
-                logger.fatal("--restart-grace requires SECONDS", .{});
+                log.logError("--restart-grace requires SECONDS", .{});
                 return .fail;
             };
             const secs = std.fmt.parseInt(u64, v, 10) catch {
-                logger.fatal("invalid --restart-grace: {s}", .{v});
+                log.logError("invalid --restart-grace: {s}", .{v});
                 return .fail;
             };
             self.restart_grace_ms = secs * 1000;
         } else if (std.mem.eql(u8, opt, "debounce")) {
             const v = longValue(inline_val, argv, i) orelse {
-                logger.fatal("--debounce requires MILLISECONDS", .{});
+                log.logError("--debounce requires MILLISECONDS", .{});
                 return .fail;
             };
             self.debounce_ms = std.fmt.parseInt(u64, v, 10) catch {
-                logger.fatal("invalid --debounce: {s}", .{v});
+                log.logError("invalid --debounce: {s}", .{v});
                 return .fail;
             };
         } else {
-            logger.fatal("unknown option: --{s}", .{opt});
-            printUsage(logger, name, 2);
+            log.logError("unknown option: --{s}", .{opt});
+            writeUsage(name, 2);
             return .fail;
         }
         return .ok;
@@ -321,47 +324,69 @@ pub fn getEnv(environ: [:null]const ?[*:0]const u8, name: []const u8) ?[:0]const
     return null;
 }
 
-fn printUsage(logger: log.Logger, name: [*:0]const u8, fd: i32) void {
+// --- Program output (NOT logs) -----------------------------------------------
+// version/help/license/usage are normal CLI output, not diagnostics: they go to
+// stdout (or stderr for usage on a parse error), unconditionally and with no log
+// prefix. This is the program talking, not the logger.
+
+/// Format `fmt` into a stack buffer and write it to `fd` via a raw write syscall.
+fn out(fd: i32, comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    sys.writeAll(fd, s);
+}
+
+/// Print "zini version X" to stdout (for `--version` / sole `-v`).
+fn writeVersion() void {
+    out(1, "{s}\n", .{VERSION_STRING});
+}
+
+/// Print the embedded license to stdout (for `-l`).
+fn writeLicense() void {
+    sys.writeAll(1, LICENSE_TEXT);
+}
+
+/// Print the usage/help text to `fd` (1 = stdout for `-h`, 2 = stderr on error).
+fn writeUsage(name: [*:0]const u8, fd: i32) void {
     const bname = std.fs.path.basename(std.mem.span(name));
-    logger.print(fd, "{s} ({s})\n", .{ bname, VERSION_STRING });
-    logger.print(fd, "Usage: {s} [OPTIONS] PROGRAM -- [ARGS] | --version\n\n", .{bname});
-    logger.print(fd, "Execute a program under the supervision of a valid init process ({s})\n\n", .{bname});
-    logger.print(fd, "Command line options:\n\n", .{});
-    logger.print(fd, "  -v, --version: Show version and exit.\n", .{});
-    logger.print(fd, "  -h: Show this help message and exit.\n", .{});
-    logger.print(fd, "  -s: Register as a process subreaper (requires Linux >= 3.4).\n", .{});
-    logger.print(fd, "  -p SIGNAL: Trigger SIGNAL when parent dies, e.g. \"-p SIGKILL\".\n", .{});
-    logger.print(fd, "  -v: Generate more verbose output. Repeat up to 3 times.\n", .{});
-    logger.print(fd, "  -w: Print a warning when processes are getting reaped.\n", .{});
-    logger.print(fd, "  -g: Send signals to the child's process group.\n", .{});
-    logger.print(fd, "  -e EXIT_CODE: Remap EXIT_CODE (from 0 to 255) to 0 (can be repeated).\n", .{});
-    logger.print(fd, "  -l: Show license and exit.\n", .{});
-    logger.print(fd, "\n", .{});
-    logger.print(fd, "File-watching (optional; off unless --watch is given):\n\n", .{});
-    logger.print(fd, "  -W, --watch PATH: Watch PATH; restart/reload the child when it changes (repeatable).\n", .{});
-    logger.print(fd, "  --on-change=restart|signal: Restart the child (default) or just signal it.\n", .{});
-    logger.print(fd, "  --stop-signal=SIGNAL: Signal used to stop the child on restart (default: SIGTERM).\n", .{});
-    logger.print(fd, "  --restart-grace=SECONDS: Wait before SIGKILL on restart (default: 10).\n", .{});
-    logger.print(fd, "  --reload-signal=SIGNAL: Signal sent in --on-change=signal mode (default: SIGHUP).\n", .{});
-    logger.print(fd, "  --debounce=MS: Coalesce bursts of changes (default: 200).\n", .{});
-    logger.print(fd, "\n", .{});
-    logger.print(fd, "Environment variables:\n\n", .{});
-    logger.print(fd, "  {s}: Register as a process subreaper (requires Linux >= 3.4).\n", .{SUBREAPER_ENV_VAR});
-    logger.print(fd, "  {s}: Set the verbosity level (default: {d}).\n", .{ VERBOSITY_ENV_VAR, DEFAULT_VERBOSITY });
-    logger.print(fd, "  {s}: Send signals to the child's process group.\n", .{KILL_PROCESS_GROUP_ENV_VAR});
-    logger.print(fd, "\n", .{});
-    logger.print(fd, "File-watching environment variables (equivalent to the flags above):\n\n", .{});
-    logger.print(fd, "  {s}: ':'-separated paths to watch (added to any --watch).\n", .{WATCH_ENV_VAR});
-    logger.print(fd, "  {s}: restart|signal.\n", .{ON_CHANGE_ENV_VAR});
-    logger.print(fd, "  {s} / {s}: signal names.\n", .{ STOP_SIGNAL_ENV_VAR, RELOAD_SIGNAL_ENV_VAR });
-    logger.print(fd, "  {s}: seconds. {s}: milliseconds.\n", .{ RESTART_GRACE_ENV_VAR, DEBOUNCE_ENV_VAR });
-    logger.print(fd, "\n", .{});
+    out(fd, "{s} ({s})\n", .{ bname, VERSION_STRING });
+    out(fd, "Usage: {s} [OPTIONS] PROGRAM -- [ARGS] | --version\n\n", .{bname});
+    out(fd, "Execute a program under the supervision of a valid init process ({s})\n\n", .{bname});
+    out(fd, "Command line options:\n\n", .{});
+    out(fd, "  --version: Show version and exit (also `-v` when it is the only argument).\n", .{});
+    out(fd, "  -h: Show this help message and exit.\n", .{});
+    out(fd, "  -s: Register as a process subreaper (requires Linux >= 3.4).\n", .{});
+    out(fd, "  -p SIGNAL: Trigger SIGNAL when parent dies, e.g. \"-p SIGKILL\".\n", .{});
+    out(fd, "  -v: Generate more verbose output. Repeat up to 2 times.\n", .{});
+    out(fd, "  -w: Print a warning when processes are getting reaped.\n", .{});
+    out(fd, "  -g: Send signals to the child's process group.\n", .{});
+    out(fd, "  -e EXIT_CODE: Remap EXIT_CODE (from 0 to 255) to 0 (can be repeated).\n", .{});
+    out(fd, "  -l: Show license and exit.\n", .{});
+    out(fd, "\n", .{});
+    out(fd, "File-watching (optional; off unless --watch is given):\n\n", .{});
+    out(fd, "  -W, --watch PATH: Watch PATH; restart/reload the child when it changes (repeatable).\n", .{});
+    out(fd, "  --on-change=restart|signal: Restart the child (default) or just signal it.\n", .{});
+    out(fd, "  --stop-signal=SIGNAL: Signal used to stop the child on restart (default: SIGTERM).\n", .{});
+    out(fd, "  --restart-grace=SECONDS: Wait before SIGKILL on restart (default: 10).\n", .{});
+    out(fd, "  --reload-signal=SIGNAL: Signal sent in --on-change=signal mode (default: SIGHUP).\n", .{});
+    out(fd, "  --debounce=MS: Coalesce bursts of changes (default: 200).\n", .{});
+    out(fd, "\n", .{});
+    out(fd, "Environment variables:\n\n", .{});
+    out(fd, "  {s}: Register as a process subreaper (requires Linux >= 3.4).\n", .{SUBREAPER_ENV_VAR});
+    out(fd, "  {s}: Set the verbosity level (default: {d}).\n", .{ VERBOSITY_ENV_VAR, DEFAULT_VERBOSITY });
+    out(fd, "  {s}: Send signals to the child's process group.\n", .{KILL_PROCESS_GROUP_ENV_VAR});
+    out(fd, "\n", .{});
+    out(fd, "File-watching environment variables (equivalent to the flags above):\n\n", .{});
+    out(fd, "  {s}: ':'-separated paths to watch (added to any --watch).\n", .{WATCH_ENV_VAR});
+    out(fd, "  {s}: restart|signal.\n", .{ON_CHANGE_ENV_VAR});
+    out(fd, "  {s} / {s}: signal names.\n", .{ STOP_SIGNAL_ENV_VAR, RELOAD_SIGNAL_ENV_VAR });
+    out(fd, "  {s}: seconds. {s}: milliseconds.\n", .{ RESTART_GRACE_ENV_VAR, DEBOUNCE_ENV_VAR });
+    out(fd, "\n", .{});
 }
 
 // --- Tests -------------------------------------------------------------------
 
 const testing = std.testing;
-const silent = log.Logger{ .silent = true };
 
 test "addExpectStatus accepts valid codes and rejects junk" {
     var cfg = Config{};
@@ -390,7 +415,7 @@ test "setPdeathsig maps names to numbers" {
 test "parse: flags, terminator, child start index" {
     var cfg = Config{};
     const argv = [_][*:0]const u8{ "zini", "-vv", "--", "echo", "hi" };
-    const r = cfg.parse(silent, &argv);
+    const r = cfg.parse(&argv);
     try testing.expectEqual(@as(usize, 3), r.run);
     try testing.expectEqual(@as(i32, DEFAULT_VERBOSITY + 2), cfg.verbosity);
 }
@@ -398,7 +423,7 @@ test "parse: flags, terminator, child start index" {
 test "parse: separate option-arguments for -e and -p" {
     var cfg = Config{};
     const argv = [_][*:0]const u8{ "zini", "-e", "42", "-p", "SIGTERM", "mycmd", "arg" };
-    const r = cfg.parse(silent, &argv);
+    const r = cfg.parse(&argv);
     try testing.expectEqual(@as(usize, 5), r.run);
     try testing.expect(cfg.expect_status.isSet(42));
     try testing.expectEqual(@as(u32, 15), cfg.parent_death_signal);
@@ -407,7 +432,7 @@ test "parse: separate option-arguments for -e and -p" {
 test "parse: attached option-argument and clustering" {
     var cfg = Config{};
     const argv = [_][*:0]const u8{ "zini", "-gpSIGKILL", "cmd" };
-    const r = cfg.parse(silent, &argv);
+    const r = cfg.parse(&argv);
     try testing.expectEqual(@as(usize, 2), r.run);
     try testing.expectEqual(@as(u32, 1), cfg.kill_process_group);
     try testing.expectEqual(@as(u32, 9), cfg.parent_death_signal);
@@ -416,24 +441,40 @@ test "parse: attached option-argument and clustering" {
 test "parse: no program means exit 1" {
     var cfg = Config{};
     const argv = [_][*:0]const u8{"zini"};
-    try testing.expectEqual(@as(u8, 1), cfg.parse(silent, &argv).exit);
+    try testing.expectEqual(@as(u8, 1), cfg.parse(&argv).exit);
 }
 
 test "parse: --version only when sole argument" {
     var cfg = Config{};
     const only = [_][*:0]const u8{ "zini", "--version" };
-    try testing.expectEqual(@as(u8, 0), cfg.parse(silent, &only).exit);
+    try testing.expectEqual(@as(u8, 0), cfg.parse(&only).exit);
 
     var cfg2 = Config{};
     const withcmd = [_][*:0]const u8{ "zini", "--version", "extra" };
-    try testing.expectEqual(@as(u8, 1), cfg2.parse(silent, &withcmd).exit);
+    try testing.expectEqual(@as(u8, 1), cfg2.parse(&withcmd).exit);
+}
+
+test "parse: --v only when sole argument" {
+    var cfg = Config{};
+    const only = [_][*:0]const u8{ "zini", "-v" };
+    try testing.expectEqual(@as(u8, 0), cfg.parse(&only).exit);
+}
+
+test "parse: invalid --on-change and unknown long option fail" {
+    var c1 = Config{};
+    const a1 = [_][*:0]const u8{ "zini", "--on-change=nope", "app" };
+    try testing.expectEqual(@as(u8, 1), c1.parse(&a1).exit);
+
+    var c2 = Config{};
+    const a2 = [_][*:0]const u8{ "zini", "--frobnicate", "app" };
+    try testing.expectEqual(@as(u8, 1), c2.parse(&a2).exit);
 }
 
 test "parse: watch flags (long + short, defaults, off by default)" {
     // No --watch: feature stays off.
     var base = Config{};
     const argv0 = [_][*:0]const u8{ "zini", "--", "app" };
-    _ = base.parse(silent, &argv0);
+    _ = base.parse(&argv0);
     try testing.expect(!base.watchEnabled());
 
     var cfg = Config{};
@@ -444,7 +485,7 @@ test "parse: watch flags (long + short, defaults, off by default)" {
         "--restart-grace",    "5",               "--debounce=50",
         "--",                 "app",
     };
-    const r = cfg.parse(silent, &argv);
+    const r = cfg.parse(&argv);
     try testing.expect(cfg.watchEnabled());
     try testing.expectEqual(@as(usize, 3), cfg.watch_count);
     try testing.expectEqualStrings("/etc/a", cfg.watch_paths[0]);
@@ -455,16 +496,6 @@ test "parse: watch flags (long + short, defaults, off by default)" {
     try testing.expectEqual(@as(u64, 5000), cfg.restart_grace_ms);
     try testing.expectEqual(@as(u64, 50), cfg.debounce_ms);
     try testing.expectEqualStrings("app", std.mem.span(argv[r.run]));
-}
-
-test "parse: invalid --on-change and unknown long option fail" {
-    var c1 = Config{};
-    const a1 = [_][*:0]const u8{ "zini", "--on-change=nope", "app" };
-    try testing.expectEqual(@as(u8, 1), c1.parse(silent, &a1).exit);
-
-    var c2 = Config{};
-    const a2 = [_][*:0]const u8{ "zini", "--frobnicate", "app" };
-    try testing.expectEqual(@as(u8, 1), c2.parse(silent, &a2).exit);
 }
 
 test "getEnv / parseEnv" {

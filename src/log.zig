@@ -1,76 +1,60 @@
-//! Leveled logger with the `[LEVEL zini (<pid>)] …` prefix.
+//! Logging glue for `std.log`.
 //!
-//! The output sink is injectable: production writes to fd 1/2 via raw syscalls;
-//! tests construct a `silent` logger so unit tests never issue a real syscall on
-//! a non-Linux host (this replaces the old `builtin.is_test` guard).
+//! `main.zig` installs `ziniLog` as `std_options.logFn`. It gates messages by a
+//! runtime `verbosity` (set from the parsed config) and writes a plain
+//! "<level>: <message>" line to stderr. Default `verbosity = 0` shows errors
+//! only; each `-v` reveals the next level.
+//!
+//!   verbosity 1 (default): err + warn
+//!   verbosity 2 (-v):     + info
+//!   verbosity 3 (-vv):    + debug
 
 const std = @import("std");
-const linux = std.os.linux;
+const builtin = @import("builtin");
 const sys = @import("sys.zig");
+const options = @import("options.zig");
 
-pub const Level = enum { fatal, warning, info, debug, trace };
+/// Runtime log verbosity; set from `Config.verbosity` after parsing.
+pub var verbosity: i32 = options.DEFAULT_VERBOSITY;
 
-pub const Logger = struct {
-    verbosity: i32 = 1,
-    /// When true, every output call is a no-op (used by unit tests).
-    silent: bool = false,
-
-    /// Raw bytes to a given fd (no prefix, no level). Used for usage/license.
-    pub fn write(self: Logger, fd: i32, bytes: []const u8) void {
-        if (self.silent) return;
-        sys.writeAll(fd, bytes);
+/// Log an error. At runtime this logs at `err` level (shown by default).
+///
+/// In test builds it is comptime-demoted to `debug`. The test binary does not use
+/// this module's logFn — Zig's test runner installs its own, which (a) fails the
+/// run on any `err`-level log and (b) prints anything at `warn` or above, so even
+/// a demote-to-`warn` would clutter output and trip `zig build`'s "failed command"
+/// reporting. `debug` is below both thresholds: not counted, not printed. Use this
+/// instead of `std.log.err` for errors that occur in unit-tested code paths.
+pub fn logError(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.is_test) {
+        std.log.debug(fmt, args);
+    } else {
+        std.log.err(fmt, args);
     }
+}
 
-    /// Formatted, unconditional output to a given fd (no level prefix).
-    pub fn print(self: Logger, fd: i32, comptime fmt: []const u8, args: anytype) void {
-        if (self.silent) return;
-        var buf: [4096]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
-        sys.writeAll(fd, s);
-    }
+/// Custom `std.log` backend: runtime-gate by `verbosity`, then write a plain
+/// "<level>: <message>" line to stderr via a raw syscall. We don't use
+/// `std.log.defaultLog` — its TTY/color machinery is dead weight for a container
+/// init and writing through `sys.writeAll` keeps us consistent and small.
+pub fn ziniLog(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const threshold: i32 = switch (level) {
+        .err => 0, // always shown
+        .warn => 1,
+        .info => 2,
+        .debug => 3,
+    };
+    if (verbosity < threshold) return;
 
-    pub fn leveled(self: Logger, comptime level: Level, comptime fmt: []const u8, args: anytype) void {
-        const threshold: i32 = comptime switch (level) {
-            .fatal => -1,
-            .warning => 0,
-            .info => 1,
-            .debug => 2,
-            .trace => 3,
-        };
-        if (level != .fatal and self.verbosity <= threshold) return;
-        if (self.silent) return;
-
-        const tag = comptime switch (level) {
-            .fatal => "FATAL",
-            .warning => "WARN ",
-            .info => "INFO ",
-            .debug => "DEBUG",
-            .trace => "TRACE",
-        };
-        const fd: i32 = comptime if (level == .fatal or level == .warning) 2 else 1;
-
-        var pbuf: [64]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&pbuf, "[{s} zini ({d})] ", .{ tag, linux.getpid() }) catch return;
-        sys.writeAll(fd, prefix);
-
-        var mbuf: [4096]u8 = undefined;
-        const msg = std.fmt.bufPrint(&mbuf, fmt ++ "\n", args) catch return;
-        sys.writeAll(fd, msg);
-    }
-
-    pub fn fatal(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        self.leveled(.fatal, fmt, args);
-    }
-    pub fn warn(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        self.leveled(.warning, fmt, args);
-    }
-    pub fn info(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        self.leveled(.info, fmt, args);
-    }
-    pub fn debug(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        self.leveled(.debug, fmt, args);
-    }
-    pub fn trace(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        self.leveled(.trace, fmt, args);
-    }
-};
+    // Match std.log's convention: "<level>: msg", or "<level>(<scope>): msg" for
+    // a non-default scope.
+    const scope_suffix = if (scope == .default) "" else "(" ++ @tagName(scope) ++ ")";
+    var buf: [1024]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, level.asText() ++ scope_suffix ++ ": " ++ format ++ "\n", args) catch return;
+    sys.writeAll(2, line);
+}
