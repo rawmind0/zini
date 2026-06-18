@@ -23,6 +23,10 @@ pub const MAX_WATCHES = 64;
 /// Events that count as "the target changed". IN_CLOSE_WRITE covers in-place
 /// writes; the CREATE/DELETE/MOVED set covers changes inside a watched
 /// directory; the *_SELF set tells us the watched inode itself went away.
+///
+/// IN_ATTRIB (permission/ownership changes) is intentionally excluded: for
+/// config files and TLS certs attribute-only changes are rare and treating
+/// them as reload triggers would add noise with little benefit.
 const watch_mask: u32 =
     IN.CLOSE_WRITE | IN.CREATE | IN.DELETE | IN.MOVED_FROM | IN.MOVED_TO |
     IN.DELETE_SELF | IN.MOVE_SELF;
@@ -67,6 +71,11 @@ pub const Watcher = struct {
     }
 
     /// Read all pending events; returns true if any watched target changed.
+    ///
+    /// Unexpected read errors (anything other than SUCCESS / EAGAIN / EINTR)
+    /// silently return the current `changed` value. This is intentional: file
+    /// watching is an opt-in, best-effort feature — a corrupt inotify fd should
+    /// not crash the container init.
     pub fn drain(self: *Watcher) bool {
         var changed = false;
         var buf: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
@@ -81,17 +90,11 @@ pub const Watcher = struct {
             const n: usize = @intCast(rc);
             if (n == 0) return changed;
 
-            var off: usize = 0;
-            while (off + @sizeOf(linux.inotify_event) <= n) {
-                const ev: *const linux.inotify_event = @ptrCast(@alignCast(&buf[off]));
-                changed = true; // any event on a watched target ⇒ reload
-                // The watched inode itself went away (atomic replace / rotation):
-                // re-add the watch on the same path (re-follows symlinks).
-                if (ev.mask & (IN.IGNORED | IN.DELETE_SELF | IN.MOVE_SELF) != 0) {
-                    self.rewatch(ev.wd);
+            changed = processEvents(buf[0..n], n, *Watcher, self, struct {
+                fn cb(w: *Watcher, wd: i32) void {
+                    w.rewatch(wd);
                 }
-                off += @sizeOf(linux.inotify_event) + ev.len;
-            }
+            }.cb) or changed;
         }
     }
 
@@ -137,3 +140,126 @@ pub const Watcher = struct {
         return @intCast(rc);
     }
 };
+
+/// Process a buffer of raw inotify events (as returned by `read` from an
+/// inotify fd). Calls `onInodeGone(wd)` for each event whose mask matches
+/// IN_IGNORED / IN_DELETE_SELF / IN_MOVE_SELF (inode replacement).
+/// Returns `true` if any event was present.
+///
+/// Extracted for testability: callers supply the buffer, `n` bytes, and a
+/// context + callback. The normal `drain()` wraps this around `linux.read()`.
+pub fn processEvents(
+    buf: []const u8,
+    n: usize,
+    comptime Context: type,
+    ctx: Context,
+    comptime onInodeGone: fn (ctx: Context, wd: i32) void,
+) bool {
+    var changed = false;
+    var off: usize = 0;
+    while (off + @sizeOf(linux.inotify_event) <= n) {
+        const ev: *const linux.inotify_event = @ptrCast(@alignCast(&buf[off]));
+        changed = true;
+        if (ev.mask & (IN.IGNORED | IN.DELETE_SELF | IN.MOVE_SELF) != 0) {
+            onInodeGone(ctx, ev.wd);
+        }
+        const name_len = @min(@as(usize, ev.len), n - off - @sizeOf(linux.inotify_event));
+        off += @sizeOf(linux.inotify_event) + name_len;
+    }
+    return changed;
+}
+
+// --- Tests -------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "watch_mask has expected bits" {
+    try testing.expect(watch_mask & IN.CLOSE_WRITE != 0);
+    try testing.expect(watch_mask & IN.CREATE != 0);
+    try testing.expect(watch_mask & IN.DELETE != 0);
+    try testing.expect(watch_mask & IN.MOVED_FROM != 0);
+    try testing.expect(watch_mask & IN.MOVED_TO != 0);
+    try testing.expect(watch_mask & IN.DELETE_SELF != 0);
+    try testing.expect(watch_mask & IN.MOVE_SELF != 0);
+    // IN_ATTRIB is intentionally NOT included.
+    try testing.expect(watch_mask & IN.ATTRIB == 0);
+}
+
+test "processEvents: no data returns false" {
+    try testing.expect(!processEvents(&.{}, 0, void, {}, struct {
+        fn cb(_: void, _: i32) void {}
+    }.cb));
+}
+
+test "processEvents: single IN_CLOSE_WRITE returns true, no rewatch" {
+    var rewatched: ?i32 = null;
+    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 64;
+    const ev: *linux.inotify_event = @ptrCast(&buf);
+    ev.* = .{ .wd = 7, .mask = IN.CLOSE_WRITE, .cookie = 0, .len = 0 };
+    _ = processEvents(&buf, @sizeOf(linux.inotify_event), *?i32, &rewatched, struct {
+        fn cb(ctx: *?i32, wd: i32) void {
+            ctx.* = wd;
+        }
+    }.cb);
+    try testing.expect(rewatched == null);
+}
+
+test "processEvents: IN_DELETE_SELF triggers callback" {
+    var rewatched: ?i32 = null;
+    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 64;
+    const ev: *linux.inotify_event = @ptrCast(&buf);
+    ev.* = .{ .wd = 3, .mask = IN.DELETE_SELF, .cookie = 0, .len = 0 };
+    _ = processEvents(&buf, @sizeOf(linux.inotify_event), *?i32, &rewatched, struct {
+        fn cb(ctx: *?i32, wd: i32) void {
+            ctx.* = wd;
+        }
+    }.cb);
+    try testing.expectEqual(@as(i32, 3), rewatched.?);
+}
+
+test "processEvents: multiple events in one buffer" {
+    var rewatch_count: usize = 0;
+    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 128;
+    // Two events back-to-back.
+    const ev1: *linux.inotify_event = @ptrCast(&buf[0]);
+    ev1.* = .{ .wd = 1, .mask = IN.CLOSE_WRITE, .cookie = 0, .len = 0 };
+    const ev2: *linux.inotify_event = @ptrCast(&buf[@sizeOf(linux.inotify_event)]);
+    ev2.* = .{ .wd = 2, .mask = IN.DELETE_SELF, .cookie = 0, .len = 0 };
+    const n = 2 * @sizeOf(linux.inotify_event);
+    _ = processEvents(&buf, n, *usize, &rewatch_count, struct {
+        fn cb(ctx: *usize, _: i32) void {
+            ctx.* += 1;
+        }
+    }.cb);
+    try testing.expectEqual(@as(usize, 1), rewatch_count);
+}
+
+test "processEvents: truncated last event is skipped" {
+    var rewatched: ?i32 = null;
+    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 64;
+    const ev: *linux.inotify_event = @ptrCast(&buf);
+    ev.* = .{ .wd = 5, .mask = IN.IGNORED, .cookie = 0, .len = 0 };
+    // Pass n smaller than a full event header.
+    _ = processEvents(&buf, @sizeOf(linux.inotify_event) - 1, *?i32, &rewatched, struct {
+        fn cb(ctx: *?i32, wd: i32) void {
+            ctx.* = wd;
+        }
+    }.cb);
+    try testing.expect(rewatched == null);
+}
+
+test "processEvents: ev.len does not overflow past buffer" {
+    var rewatch_count: usize = 0;
+    // One event with an impossibly large name_len, then a real event.
+    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 128;
+    const ev1: *linux.inotify_event = @ptrCast(&buf[0]);
+    ev1.* = .{ .wd = 1, .mask = IN.CLOSE_WRITE, .cookie = 0, .len = 65535 }; // huge len
+    const n = @sizeOf(linux.inotify_event);
+    _ = processEvents(&buf, n, *usize, &rewatch_count, struct {
+        fn cb(ctx: *usize, _: i32) void {
+            ctx.* += 1;
+        }
+    }.cb);
+    // Should not crash; the huge ev.len is clamped to available data.
+    try testing.expectEqual(@as(usize, 0), rewatch_count);
+}

@@ -26,6 +26,7 @@ const PR = linux.PR;
 /// on every child death, so reaping is fully event-driven and the periodic reap
 /// tick the old sigtimedwait loop needed is gone (no idle wakeups).
 const reap_tick_ms: i32 = -1;
+const max_epoll_events = 8;
 
 const reaper_warning =
     "zini is not running as PID 1 and isn't registered as a child subreaper.\n" ++
@@ -88,7 +89,7 @@ pub const Zini = struct {
                 log.logError("Failed to set up file watcher", .{});
                 return 1;
             };
-            self.loop.addInotify(self.watcher.fd) catch {
+            self.loop.addFd(self.watcher.fd) catch {
                 log.logError("Failed to register file watcher", .{});
                 return 1;
             };
@@ -126,7 +127,7 @@ pub const Zini = struct {
     /// One iteration: wait for an event source, handle it, run any due timer,
     /// then reap.
     fn tick(self: *Zini, child_exitcode: *i32) bool {
-        var events: [8]linux.epoll_event = undefined;
+        var events: [max_epoll_events]linux.epoll_event = undefined;
 
         self.profiler.beforeWait();
         const n = self.loop.wait(&events, self.computeTimeout()) catch {
@@ -144,6 +145,8 @@ pub const Zini = struct {
                     self.drainSignalfd() catch return false;
                 } else if (self.cfg.watchEnabled() and ev.data.fd == self.watcher.fd) {
                     if (self.watcher.drain()) self.onWatchChange();
+                } else {
+                    std.log.debug("spurious epoll event on fd {d}", .{ev.data.fd});
                 }
             }
         }
@@ -156,10 +159,15 @@ pub const Zini = struct {
     /// epoll_wait timeout: block forever unless a debounce/grace deadline is
     /// pending, in which case wake when it's due (keeps idle tickless).
     fn computeTimeout(self: *Zini) i32 {
-        if (self.reload == .running) return reap_tick_ms; // -1
-        const now = sys.monotonicNanos();
-        if (self.deadline_ns <= now) return 0;
-        const ms = (self.deadline_ns - now) / 1_000_000;
+        return computeTimeoutMs(self.reload, self.deadline_ns, sys.monotonicNanos());
+    }
+
+    /// Pure logic: timeout based on reload state and deadline. Exported for
+    /// testing; takes `now` as a parameter so no syscall dependency.
+    fn computeTimeoutMs(reload: Reload, deadline_ns: u64, now: u64) i32 {
+        if (reload == .running) return reap_tick_ms; // -1
+        if (deadline_ns <= now) return 0;
+        const ms = (deadline_ns - now) / 1_000_000;
         return if (ms > std.math.maxInt(i32)) std.math.maxInt(i32) else @intCast(ms);
     }
 
@@ -206,12 +214,32 @@ pub const Zini = struct {
         }
     }
 
+    /// Compute child exit code from a wait4 status word and the expected-status
+    /// mask. Returns -1 when the status is neither a normal exit nor a signal
+    /// death (caller treats that as fatal).
+    fn computeExitCode(status: u32, expect_status: std.StaticBitSet(256)) i32 {
+        const raw: i32 = if (linux.W.IFEXITED(status))
+            @intCast(linux.W.EXITSTATUS(status))
+        else if (linux.W.IFSIGNALED(status))
+            128 + @as(i32, @intCast(@intFromEnum(linux.W.TERMSIG(status))))
+        else
+            return -1;
+
+        var code = @mod(raw, 256);
+        if (expect_status.isSet(@intCast(code))) code = 0;
+        return code;
+    }
+
     fn killChild(self: *Zini, signo: u32) void {
         const target: linux.pid_t = if (self.cfg.kill_process_group != 0) -self.child_pid else self.child_pid;
         posix.kill(target, @enumFromInt(signo)) catch |err| switch (err) {
             error.ProcessNotFound => {},
-            error.PermissionDenied => std.log.warn("kill failed: permission denied", .{}),
-            else => std.log.warn("kill failed (unexpected error)", .{}),
+            error.PermissionDenied => {
+                log.logError("kill failed: permission denied", .{});
+            },
+            else => {
+                log.logError("kill failed (unexpected error)", .{});
+            },
         };
     }
 
@@ -279,21 +307,18 @@ pub const Zini = struct {
                     continue;
                 }
 
-                if (linux.W.IFEXITED(r.status)) {
-                    const es = linux.W.EXITSTATUS(r.status);
-                    std.log.info("Main child exited normally (with status '{d}')", .{es});
-                    child_exitcode.* = es;
-                } else if (linux.W.IFSIGNALED(r.status)) {
-                    const term = linux.W.TERMSIG(r.status);
-                    std.log.info("Main child exited with signal (with signal '{s}')", .{signals.name(@intFromEnum(term))});
-                    child_exitcode.* = 128 + @as(i32, @intCast(@intFromEnum(term)));
-                } else {
+                const code = computeExitCode(r.status, self.cfg.expect_status);
+                if (code == -1) {
                     log.logError("Main child exited for unknown reason", .{});
                     return error.Fatal;
                 }
 
-                child_exitcode.* = @mod(child_exitcode.*, 256);
-                if (self.cfg.expect_status.isSet(@intCast(child_exitcode.*))) child_exitcode.* = 0;
+                if (linux.W.IFEXITED(r.status)) {
+                    std.log.info("Main child exited normally (with status '{d}')", .{linux.W.EXITSTATUS(r.status)});
+                } else if (linux.W.IFSIGNALED(r.status)) {
+                    std.log.info("Main child exited with signal (with signal '{s}')", .{signals.name(@intFromEnum(linux.W.TERMSIG(r.status)))});
+                }
+                child_exitcode.* = code;
             } else if (self.cfg.warn_on_reap != 0) {
                 std.log.warn("Reaped zombie process with pid={d}", .{r.pid});
             }
@@ -380,3 +405,66 @@ pub const Zini = struct {
         return r.status;
     }
 };
+
+// --- Tests -------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "computeExitCode: normal exit" {
+    // exit(42) => wait status = 42 << 8
+    const status: u32 = 42 << 8;
+    try testing.expectEqual(@as(i32, 42), Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty()));
+}
+
+test "computeExitCode: signal death" {
+    // killed by SIGTERM (15) => wait status = 15
+    const status: u32 = 15;
+    const code = Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty());
+    try testing.expectEqual(@as(i32, 143), code); // 128 + 15
+}
+
+test "computeExitCode: exit status modulo 256" {
+    // exit(300) => 300 mod 256 = 44
+    const status: u32 = 300 << 8;
+    try testing.expectEqual(@as(i32, 44), Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty()));
+}
+
+test "computeExitCode: expect_status remaps to 0" {
+    var expect = std.StaticBitSet(256).initEmpty();
+    expect.set(42);
+    const status: u32 = 42 << 8;
+    try testing.expectEqual(@as(i32, 0), Zini.computeExitCode(status, expect));
+}
+
+test "computeExitCode: unexpected status returns -1" {
+    // status with both exit and signal bits impossible => not a real scenario,
+    // but verify the fallback path returns -1 for a nonsense status word.
+    const status: u32 = 0xffff;
+    try testing.expectEqual(@as(i32, -1), Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty()));
+}
+
+test "computeExitCode: expect_status does not remap 0 to 0 (no-op)" {
+    var expect = std.StaticBitSet(256).initEmpty();
+    expect.set(0);
+    const status: u32 = 0 << 8; // exit(0)
+    try testing.expectEqual(@as(i32, 0), Zini.computeExitCode(status, expect));
+}
+
+test "computeTimeoutMs: running returns -1" {
+    try testing.expectEqual(@as(i32, -1), Zini.computeTimeoutMs(.running, 0, 0));
+}
+
+test "computeTimeoutMs: past deadline returns 0" {
+    try testing.expectEqual(@as(i32, 0), Zini.computeTimeoutMs(.debouncing, 100, 200));
+    try testing.expectEqual(@as(i32, 0), Zini.computeTimeoutMs(.stopping, 100, 100));
+}
+
+test "computeTimeoutMs: future deadline returns milliseconds" {
+    try testing.expectEqual(@as(i32, 50), Zini.computeTimeoutMs(.debouncing, 150_000_000, 100_000_000));
+}
+
+test "computeTimeoutMs: huge delta clamped to maxInt(i32)" {
+    const far = std.math.maxInt(u64);
+    const now: u64 = 0;
+    try testing.expectEqual(std.math.maxInt(i32), Zini.computeTimeoutMs(.debouncing, far, now));
+}

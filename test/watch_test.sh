@@ -81,6 +81,20 @@ run wf --entrypoint /usr/local/bin/zini "$IMAGE" -W /fix/file -- "$CLEAN"
 sleep 1; ex wf 'echo a > /fix/file'; sleep 1
 n=$(starts wf); [ "$n" -ge 2 ] && ok "-W flag restarts (starts=$n)" || fail "-W flag (starts=$n)"; clean wf
 
+# stress: many rapid restarts must not lose watches or leak fds
+run wstress -e ZINI_WATCH=/fix/file -e ZINI_DEBOUNCE=50 -e ZINI_RESTART_GRACE=1 "$IMAGE" "$CLEAN"
+sleep 1
+for i in $(seq 1 20); do ex wstress "echo $i > /fix/file"; done
+sleep 3
+n=$(starts wstress)
+[ "$n" -ge 5 ] && ok "stress 20 writes: still restarting (starts=$n)" || fail "stress restart loss (starts=$n)"
+# Verify watcher is still alive by triggering one more restart
+ex wstress 'echo final > /fix/file'
+sleep 2
+n2=$(starts wstress)
+[ "$n2" -ge "$((n + 1))" ] && ok "stress: watcher survives many events (total=$n2)" || fail "stress: watcher died (total=$n2)"
+clean wstress
+
 echo
 if [ "$fails" -eq 0 ]; then
     echo "All file-watch tests passed."

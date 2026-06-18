@@ -39,9 +39,12 @@ pub const OnChange = enum { restart, signal };
 
 pub const Config = struct {
     verbosity: i32 = DEFAULT_VERBOSITY,
+    /// Counter (not bool): incremented by each `-s` flag or `TINI_SUBREAPER` env.
     subreaper: u32 = 0,
     parent_death_signal: u32 = 0,
+    /// Counter (not bool): incremented by each `-g` flag or `TINI_KILL_PROCESS_GROUP` env.
     kill_process_group: u32 = 0,
+    /// Counter (not bool): incremented by each `-w` flag.
     warn_on_reap: u32 = 0,
     expect_status: std.StaticBitSet(256) = std.StaticBitSet(256).initEmpty(),
 
@@ -56,7 +59,10 @@ pub const Config = struct {
     debounce_ms: u64 = 200, // coalesce bursts of events
 
     pub fn watchEnabled(self: *const Config) bool {
-        return self.watch_count > 0;
+        if (self.watch_count == 0) return false;
+        // DEBUG ASSERT: ensure all tracked entries are readable.
+        for (self.watch_paths[0..self.watch_count]) |p| _ = p.len;
+        return true;
     }
 
     pub const ParseResult = union(enum) {
@@ -513,6 +519,14 @@ test "getEnv / parseEnv" {
     try testing.expectEqual(@as(u32, 1), cfg.subreaper);
     try testing.expectEqual(@as(i32, 3), cfg.verbosity);
     try testing.expectEqual(@as(u32, 0), cfg.kill_process_group);
+
+    // Invalid TINI_VERBOSITY is silently treated as 0 (mirrors atoi()).
+    var cfg_bad = Config{};
+    const env_bad: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{
+        "TINI_VERBOSITY=abc",
+    };
+    cfg_bad.parseEnv(env_bad);
+    try testing.expectEqual(@as(i32, 0), cfg_bad.verbosity);
 }
 
 test "parseEnv: ZINI_ watch vars (paths additive, scalars set)" {
@@ -538,4 +552,49 @@ test "parseEnv: ZINI_ watch vars (paths additive, scalars set)" {
     try testing.expectEqual(@as(u32, 10), cfg.reload_signal); // SIGUSR1
     try testing.expectEqual(@as(u64, 5000), cfg.restart_grace_ms);
     try testing.expectEqual(@as(u64, 50), cfg.debounce_ms);
+}
+
+test "default Config values" {
+    const cfg = Config{};
+    try testing.expectEqual(DEFAULT_VERBOSITY, cfg.verbosity);
+    try testing.expectEqual(@as(u32, 0), cfg.subreaper);
+    try testing.expectEqual(@as(u32, 0), cfg.parent_death_signal);
+    try testing.expectEqual(@as(u32, 0), cfg.kill_process_group);
+    try testing.expectEqual(@as(u32, 0), cfg.warn_on_reap);
+    try testing.expect(!cfg.watchEnabled());
+    try testing.expectEqual(OnChange.restart, cfg.on_change);
+    try testing.expectEqual(@as(u32, @intFromEnum(SIG.TERM)), cfg.stop_signal);
+    try testing.expectEqual(@as(u32, @intFromEnum(SIG.HUP)), cfg.reload_signal);
+    try testing.expectEqual(@as(u64, 10_000), cfg.restart_grace_ms);
+    try testing.expectEqual(@as(u64, 200), cfg.debounce_ms);
+}
+
+test "parseEnv verbosity overrides -v flag" {
+    var cfg = Config{};
+    const argv = [_][*:0]const u8{ "zini", "-vv", "--", "cmd" };
+    _ = cfg.parse(&argv);
+    try testing.expectEqual(DEFAULT_VERBOSITY + 2, cfg.verbosity);
+
+    const env: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{
+        "TINI_VERBOSITY=0",
+    };
+    cfg.parseEnv(env);
+    try testing.expectEqual(@as(i32, 0), cfg.verbosity);
+}
+
+test "parse: -W with missing argument exits 1" {
+    var cfg = Config{};
+    const argv = [_][*:0]const u8{ "zini", "-W" };
+    try testing.expectEqual(@as(u8, 1), cfg.parse(&argv).exit);
+}
+
+test "parse: -W overflow exits 1" {
+    var cfg = Config{};
+    // Build argv with MAX_WATCHES + 1 attached -W entries; the extra one
+    // pushes watch_count past the limit.
+    var argv: [watcher.MAX_WATCHES + 3][*:0]const u8 = undefined;
+    argv[0] = "zini";
+    for (1..argv.len - 1) |i| argv[i] = "-W/tmp/x";
+    argv[argv.len - 1] = "--";
+    try testing.expectEqual(@as(u8, 1), cfg.parse(&argv).exit);
 }

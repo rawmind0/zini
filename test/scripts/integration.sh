@@ -26,11 +26,14 @@ check_exit 0 "--version exits 0" "$ZINI" --version
 check_exit 0 "-h exits 0"        "$ZINI" -h
 "$ZINI" -l 2>&1 | grep -q "MIT License" && ok "-l prints license" || fail "-l output"
 check_exit 1 "no program exits 1" "$ZINI"
+check_exit 0 "default verbosity works" "$ZINI" -- true
+check_exit 0 "-vv does not crash" "$ZINI" -vv -- true
 
 # --- exit-code handling ------------------------------------------------------
 check_exit 0   "passthrough exit 0"   "$ZINI" -- true
 check_exit 42  "passthrough exit 42"  "$ZINI" -- /scripts/child-exit.sh 42
-check_exit 143 "killed by SIGTERM=143" "$ZINI" -- /scripts/child-selfterm.sh
+sigterm=15; expected=$((128 + sigterm))
+check_exit $expected "killed by SIGTERM ($expected = 128 + $sigterm)" "$ZINI" -- /scripts/child-selfterm.sh
 check_exit 0   "-e 42 remaps to 0"    "$ZINI" -e 42 -- /scripts/child-exit.sh 42
 check_exit 127 "missing command = 127" "$ZINI" -- this-command-does-not-exist
 # permission denied = 126
@@ -56,6 +59,14 @@ sleep 0.5
 kill -TERM "$zpid"
 wait "$zpid"; rc=$?
 if [ "$rc" -eq 0 ]; then ok "forwards SIGTERM to child"; else fail "signal forwarding (rc=$rc)"; fi
+
+# --- -g (kill process group) --------------------------------------------------
+"$ZINI" -g -- /scripts/child-clean.sh 2>/dev/null &
+zpid=$!
+sleep 0.5
+kill -TERM "$zpid"
+wait "$zpid"; rc=$?
+if [ "$rc" -eq 0 ]; then ok "-g forwards SIGTERM to child process group"; else fail "-g signal forwarding (rc=$rc)"; fi
 
 # --- zombie reaping ----------------------------------------------------------
 # Orphan a grandchild reparented to PID 1 (the outer zini); it must be reaped.
