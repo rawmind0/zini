@@ -10,34 +10,34 @@ const SIG = linux.SIG;
 pub const Named = struct { name: []const u8, number: u32 };
 
 pub const table = [_]Named{
-    .{ .name = "SIGHUP", .number = @intFromEnum(SIG.HUP) },
-    .{ .name = "SIGINT", .number = @intFromEnum(SIG.INT) },
-    .{ .name = "SIGQUIT", .number = @intFromEnum(SIG.QUIT) },
-    .{ .name = "SIGILL", .number = @intFromEnum(SIG.ILL) },
-    .{ .name = "SIGTRAP", .number = @intFromEnum(SIG.TRAP) },
-    .{ .name = "SIGABRT", .number = @intFromEnum(SIG.ABRT) },
-    .{ .name = "SIGBUS", .number = @intFromEnum(SIG.BUS) },
-    .{ .name = "SIGFPE", .number = @intFromEnum(SIG.FPE) },
-    .{ .name = "SIGKILL", .number = @intFromEnum(SIG.KILL) },
-    .{ .name = "SIGUSR1", .number = @intFromEnum(SIG.USR1) },
-    .{ .name = "SIGSEGV", .number = @intFromEnum(SIG.SEGV) },
-    .{ .name = "SIGUSR2", .number = @intFromEnum(SIG.USR2) },
-    .{ .name = "SIGPIPE", .number = @intFromEnum(SIG.PIPE) },
-    .{ .name = "SIGALRM", .number = @intFromEnum(SIG.ALRM) },
-    .{ .name = "SIGTERM", .number = @intFromEnum(SIG.TERM) },
-    .{ .name = "SIGCHLD", .number = @intFromEnum(SIG.CHLD) },
-    .{ .name = "SIGCONT", .number = @intFromEnum(SIG.CONT) },
-    .{ .name = "SIGSTOP", .number = @intFromEnum(SIG.STOP) },
-    .{ .name = "SIGTSTP", .number = @intFromEnum(SIG.TSTP) },
-    .{ .name = "SIGTTIN", .number = @intFromEnum(SIG.TTIN) },
-    .{ .name = "SIGTTOU", .number = @intFromEnum(SIG.TTOU) },
-    .{ .name = "SIGURG", .number = @intFromEnum(SIG.URG) },
-    .{ .name = "SIGXCPU", .number = @intFromEnum(SIG.XCPU) },
-    .{ .name = "SIGXFSZ", .number = @intFromEnum(SIG.XFSZ) },
-    .{ .name = "SIGVTALRM", .number = @intFromEnum(SIG.VTALRM) },
-    .{ .name = "SIGPROF", .number = @intFromEnum(SIG.PROF) },
-    .{ .name = "SIGWINCH", .number = @intFromEnum(SIG.WINCH) },
-    .{ .name = "SIGSYS", .number = @intFromEnum(SIG.SYS) },
+    .{ .name = "SIGHUP", .number = @backingInt(SIG.HUP) },
+    .{ .name = "SIGINT", .number = @backingInt(SIG.INT) },
+    .{ .name = "SIGQUIT", .number = @backingInt(SIG.QUIT) },
+    .{ .name = "SIGILL", .number = @backingInt(SIG.ILL) },
+    .{ .name = "SIGTRAP", .number = @backingInt(SIG.TRAP) },
+    .{ .name = "SIGABRT", .number = @backingInt(SIG.ABRT) },
+    .{ .name = "SIGBUS", .number = @backingInt(SIG.BUS) },
+    .{ .name = "SIGFPE", .number = @backingInt(SIG.FPE) },
+    .{ .name = "SIGKILL", .number = @backingInt(SIG.KILL) },
+    .{ .name = "SIGUSR1", .number = @backingInt(SIG.USR1) },
+    .{ .name = "SIGSEGV", .number = @backingInt(SIG.SEGV) },
+    .{ .name = "SIGUSR2", .number = @backingInt(SIG.USR2) },
+    .{ .name = "SIGPIPE", .number = @backingInt(SIG.PIPE) },
+    .{ .name = "SIGALRM", .number = @backingInt(SIG.ALRM) },
+    .{ .name = "SIGTERM", .number = @backingInt(SIG.TERM) },
+    .{ .name = "SIGCHLD", .number = @backingInt(SIG.CHLD) },
+    .{ .name = "SIGCONT", .number = @backingInt(SIG.CONT) },
+    .{ .name = "SIGSTOP", .number = @backingInt(SIG.STOP) },
+    .{ .name = "SIGTSTP", .number = @backingInt(SIG.TSTP) },
+    .{ .name = "SIGTTIN", .number = @backingInt(SIG.TTIN) },
+    .{ .name = "SIGTTOU", .number = @backingInt(SIG.TTOU) },
+    .{ .name = "SIGURG", .number = @backingInt(SIG.URG) },
+    .{ .name = "SIGXCPU", .number = @backingInt(SIG.XCPU) },
+    .{ .name = "SIGXFSZ", .number = @backingInt(SIG.XFSZ) },
+    .{ .name = "SIGVTALRM", .number = @backingInt(SIG.VTALRM) },
+    .{ .name = "SIGPROF", .number = @backingInt(SIG.PROF) },
+    .{ .name = "SIGWINCH", .number = @backingInt(SIG.WINCH) },
+    .{ .name = "SIGSYS", .number = @backingInt(SIG.SYS) },
 };
 
 /// Human-readable name for a signal number (replaces libc strsignal).
@@ -111,13 +111,13 @@ test "State for_main_loop excludes correct signals" {
     try testing.expectEqual(@as(usize, 9), excluded.len);
     // Each named signal should appear in the signal table.
     for (excluded) |sig| {
-        const num = @intFromEnum(sig);
+        const num = @backingInt(sig);
         _ = name(num); // would panic if not in table
     }
     // Verify all other standard signals are NOT excluded.
     const included = comptime [_]SIG{ .HUP, .INT, .QUIT, .KILL, .USR1, .USR2, .PIPE, .ALRM, .TERM, .CHLD, .CONT, .STOP, .TSTP, .URG, .XCPU, .XFSZ, .VTALRM, .PROF, .WINCH };
     for (included) |sig| {
-        const num = @intFromEnum(sig);
+        const num = @backingInt(sig);
         _ = name(num);
     }
 }
@@ -149,9 +149,9 @@ test "State configure/restore round-trip" {
     var parent_mask: linux.sigset_t = undefined;
     state.configure(&parent_mask);
 
-    try testing.expect(posix.sigismember(&parent_mask, @intFromEnum(SIG.INT)));
-    try testing.expect(!posix.sigismember(&parent_mask, @intFromEnum(SIG.FPE)));
-    try testing.expect(!posix.sigismember(&parent_mask, @intFromEnum(SIG.TTIN)));
+    try testing.expect(posix.sigismember(&parent_mask, @backingInt(SIG.INT)));
+    try testing.expect(!posix.sigismember(&parent_mask, @backingInt(SIG.FPE)));
+    try testing.expect(!posix.sigismember(&parent_mask, @backingInt(SIG.TTIN)));
 
     state.restore();
     var mask_after: linux.sigset_t = undefined;

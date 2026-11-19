@@ -101,7 +101,7 @@ pub const Zini = struct {
 
         // Trigger a signal on us when our parent dies.
         if (self.cfg.parent_death_signal != 0) {
-            const rc = linux.prctl(@intFromEnum(PR.SET_PDEATHSIG), self.cfg.parent_death_signal, 0, 0, 0);
+            const rc = linux.prctl(@backingInt(PR.SET_PDEATHSIG), self.cfg.parent_death_signal, 0, 0, 0);
             if (sys.errno(rc) != .SUCCESS) {
                 log.logError("Failed to set up parent death signal", .{});
                 return 1;
@@ -207,7 +207,7 @@ pub const Zini = struct {
             },
             .stopping => {
                 std.log.warn("child did not exit within grace period; sending SIGKILL", .{});
-                self.killChild(@intFromEnum(SIG.KILL));
+                self.killChild(@backingInt(SIG.KILL));
                 self.deadline_ns = 0; // now wait for the reap → respawn
             },
             .running => unreachable,
@@ -221,7 +221,7 @@ pub const Zini = struct {
         const raw: i32 = if (linux.W.IFEXITED(status))
             @intCast(linux.W.EXITSTATUS(status))
         else if (linux.W.IFSIGNALED(status))
-            128 + @as(i32, @intCast(@intFromEnum(linux.W.TERMSIG(status))))
+            128 + @as(i32, @intCast(@backingInt(linux.W.TERMSIG(status))))
         else
             return -1;
 
@@ -232,7 +232,7 @@ pub const Zini = struct {
 
     fn killChild(self: *Zini, signo: u32) void {
         const target: linux.pid_t = if (self.cfg.kill_process_group != 0) -self.child_pid else self.child_pid;
-        posix.kill(target, @enumFromInt(signo)) catch |err| switch (err) {
+        posix.kill(target, @fromBackingInt(@intCast(signo))) catch |err| switch (err) {
             error.ProcessNotFound => {},
             error.PermissionDenied => {
                 log.logError("kill failed: permission denied", .{});
@@ -261,7 +261,7 @@ pub const Zini = struct {
             const count = @as(usize, @intCast(rc)) / @sizeOf(linux.signalfd_siginfo);
             if (count == 0) return;
             for (buf[0..count]) |si| {
-                if (si.signo == @intFromEnum(SIG.CHLD)) {
+                if (si.signo == @backingInt(SIG.CHLD)) {
                     std.log.debug("Received SIGCHLD", .{});
                 } else {
                     try self.forwardSignal(si.signo);
@@ -273,7 +273,7 @@ pub const Zini = struct {
     fn forwardSignal(self: *Zini, signo: u32) Error!void {
         std.log.debug("Passing signal: '{s}'", .{signals.name(signo)});
         const target: linux.pid_t = if (self.cfg.kill_process_group != 0) -self.child_pid else self.child_pid;
-        posix.kill(target, @enumFromInt(signo)) catch |err| switch (err) {
+        posix.kill(target, @fromBackingInt(@intCast(signo))) catch |err| switch (err) {
             error.ProcessNotFound => std.log.warn("Child was dead when forwarding signal", .{}),
             error.PermissionDenied => {
                 log.logError("Permission denied when forwarding signal", .{});
@@ -316,7 +316,7 @@ pub const Zini = struct {
                 if (linux.W.IFEXITED(r.status)) {
                     std.log.info("Main child exited normally (with status '{d}')", .{linux.W.EXITSTATUS(r.status)});
                 } else if (linux.W.IFSIGNALED(r.status)) {
-                    std.log.info("Main child exited with signal (with signal '{s}')", .{signals.name(@intFromEnum(linux.W.TERMSIG(r.status)))});
+                    std.log.info("Main child exited with signal (with signal '{s}')", .{signals.name(@backingInt(linux.W.TERMSIG(r.status)))});
                 }
                 child_exitcode.* = code;
             } else if (self.cfg.warn_on_reap != 0) {
@@ -327,7 +327,7 @@ pub const Zini = struct {
 
     fn registerSubreaper(self: *Zini) Error!void {
         if (self.cfg.subreaper == 0) return;
-        const rc = linux.prctl(@intFromEnum(PR.SET_CHILD_SUBREAPER), 1, 0, 0, 0);
+        const rc = linux.prctl(@backingInt(PR.SET_CHILD_SUBREAPER), 1, 0, 0, 0);
         switch (sys.errno(rc)) {
             .SUCCESS => std.log.debug("Registered as child subreaper", .{}),
             .INVAL => {
@@ -345,7 +345,7 @@ pub const Zini = struct {
         if (linux.getpid() == 1) return;
 
         var bit: i32 = 0;
-        const rc = linux.prctl(@intFromEnum(PR.GET_CHILD_SUBREAPER), @intFromPtr(&bit), 0, 0, 0);
+        const rc = linux.prctl(@backingInt(PR.GET_CHILD_SUBREAPER), @intFromPtr(&bit), 0, 0, 0);
         if (sys.errno(rc) == .SUCCESS) {
             if (bit == 1) return;
         } else {
@@ -413,24 +413,24 @@ const testing = std.testing;
 test "computeExitCode: normal exit" {
     // exit(42) => wait status = 42 << 8
     const status: u32 = 42 << 8;
-    try testing.expectEqual(@as(i32, 42), Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty()));
+    try testing.expectEqual(@as(i32, 42), Zini.computeExitCode(status, std.StaticBitSet(256).empty));
 }
 
 test "computeExitCode: signal death" {
     // killed by SIGTERM (15) => wait status = 15
     const status: u32 = 15;
-    const code = Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty());
+    const code = Zini.computeExitCode(status, std.StaticBitSet(256).empty);
     try testing.expectEqual(@as(i32, 143), code); // 128 + 15
 }
 
 test "computeExitCode: exit status modulo 256" {
     // exit(300) => 300 mod 256 = 44
     const status: u32 = 300 << 8;
-    try testing.expectEqual(@as(i32, 44), Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty()));
+    try testing.expectEqual(@as(i32, 44), Zini.computeExitCode(status, std.StaticBitSet(256).empty));
 }
 
 test "computeExitCode: expect_status remaps to 0" {
-    var expect = std.StaticBitSet(256).initEmpty();
+    var expect = std.StaticBitSet(256).empty;
     expect.set(42);
     const status: u32 = 42 << 8;
     try testing.expectEqual(@as(i32, 0), Zini.computeExitCode(status, expect));
@@ -440,11 +440,11 @@ test "computeExitCode: unexpected status returns -1" {
     // status with both exit and signal bits impossible => not a real scenario,
     // but verify the fallback path returns -1 for a nonsense status word.
     const status: u32 = 0xffff;
-    try testing.expectEqual(@as(i32, -1), Zini.computeExitCode(status, std.StaticBitSet(256).initEmpty()));
+    try testing.expectEqual(@as(i32, -1), Zini.computeExitCode(status, std.StaticBitSet(256).empty));
 }
 
 test "computeExitCode: expect_status does not remap 0 to 0 (no-op)" {
-    var expect = std.StaticBitSet(256).initEmpty();
+    var expect = std.StaticBitSet(256).empty;
     expect.set(0);
     const status: u32 = 0 << 8; // exit(0)
     try testing.expectEqual(@as(i32, 0), Zini.computeExitCode(status, expect));

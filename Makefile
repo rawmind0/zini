@@ -9,6 +9,7 @@ BIN_FILES ?= "zini-linux-amd64 zini-linux-arm64"
 ZIG ?= zig
 IMAGE ?= rawmind/zini
 IMAGE_TEST ?= zini-test
+DOCKER ?= podman
 
 .PHONY: build release test fmt fmt-check lint ci run docker e2e-test bench clean
 
@@ -44,16 +45,16 @@ run: ## Build and run zini (use: make run ARGS="-- echo hi")
 	$(ZIG) build run -- $(ARGS)
 
 docker: release build ## Build the production image and the test image (release + debug binaries)
-	docker build -t $(IMAGE) .
-	docker build -t $(IMAGE_TEST) -f Dockerfile.tests --build-arg BASE_IMAGE=$(IMAGE) .
+	$(DOCKER) build -t $(IMAGE) --platform linux/amd64,linux/arm64 .
+	$(DOCKER) build -t $(IMAGE_TEST) -f Dockerfile.tests --build-arg BASE_IMAGE=$(IMAGE) .
 
 e2e-test: docker ## Run the in-container + host-driven integration suites
-	docker run --rm $(IMAGE_TEST) /scripts/integration.sh
-	IMAGE=$(IMAGE_TEST) sh test/docker_signal_test.sh
-	IMAGE=$(IMAGE_TEST) sh test/watch_test.sh
+	$(DOCKER) run --rm -e DOCKER=$(DOCKER) $(IMAGE_TEST) /scripts/integration.sh
+	IMAGE=$(IMAGE_TEST) DOCKER=$(DOCKER) sh test/docker_signal_test.sh
+	IMAGE=$(IMAGE_TEST) DOCKER=$(DOCKER) sh test/watch_test.sh
 
 bench: docker ## Profile the supervision loop (Debug build) as PID 1 in a container
-	IMAGE=$(IMAGE_TEST) sh test/bench.sh
+	IMAGE=$(IMAGE_TEST) DOCKER=$(DOCKER) sh test/bench.sh
 
 clean: ## Remove build artifacts
 	rm -rf zig-out .zig-cache

@@ -9,6 +9,7 @@
 set -u
 
 IMAGE="${IMAGE:-zini-test}"
+DOCKER=${DOCKER:-docker}
 fails=0
 ok()   { printf '  ok   - %s\n' "$1"; }
 fail() { printf '  FAIL - %s\n' "$1"; fails=$((fails + 1)); }
@@ -19,14 +20,14 @@ echo "zini docker-stop (PID 1 signal forwarding) test"
 # If zini forwards SIGTERM, the trap fires, the child exits 0, and the container
 # exits 0 almost instantly. If it did NOT forward, docker would wait the full
 # timeout and SIGKILL -> exit 137, slowly.
-cid=$(docker run -d "$IMAGE" /scripts/child-clean.sh)
+cid=$(${DOCKER} run -d "$IMAGE" /scripts/child-clean.sh)
 sleep 0.7
 start=$(date +%s)
-docker stop -t 10 "$cid" >/dev/null
+${DOCKER} stop -t 10 "$cid" >/dev/null
 end=$(date +%s)
 elapsed=$((end - start))
-rc=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
-docker rm "$cid" >/dev/null
+rc=$(${DOCKER} inspect -f '{{.State.ExitCode}}' "$cid")
+${DOCKER} rm "$cid" >/dev/null
 
 if [ "$rc" = "0" ]; then
     ok "docker stop -> container exited 0 (zini forwarded SIGTERM to child)"
@@ -42,11 +43,11 @@ fi
 # --- negative control: child ignores SIGTERM ---------------------------------
 # Confirms the assertions above actually discriminate: a child that ignores
 # SIGTERM forces docker's SIGKILL fallback -> exit 137 (128 + 9).
-cid2=$(docker run -d "$IMAGE" /scripts/child-stubborn.sh)
+cid2=$(${DOCKER} run -d "$IMAGE" /scripts/child-stubborn.sh)
 sleep 0.7
-docker stop -t 2 "$cid2" >/dev/null
-rc2=$(docker inspect -f '{{.State.ExitCode}}' "$cid2")
-docker rm "$cid2" >/dev/null
+${DOCKER} stop -t 2 "$cid2" >/dev/null
+rc2=$(${DOCKER} inspect -f '{{.State.ExitCode}}' "$cid2")
+${DOCKER} rm "$cid2" >/dev/null
 if [ "$rc2" = "137" ]; then
     ok "control: TERM-ignoring child is SIGKILLed by docker (137)"
 else

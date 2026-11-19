@@ -152,7 +152,7 @@ How it works and what it handles:
 
 ## Building
 
-Requires [Zig 0.16.0](https://ziglang.org/download/). The program is Linux-only;
+Requires [Zig 0.17.1](https://ziglang.org/download/). The program is Linux-only;
 when building from a non-Linux host the default target cross-compiles to Linux.
 
 ```sh

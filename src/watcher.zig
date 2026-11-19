@@ -134,7 +134,7 @@ pub const Watcher = struct {
 
     fn addWatch(fd: i32, path: []const u8) error{AddWatchFailed}!i32 {
         var zbuf: [4096]u8 = undefined;
-        const pz = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return error.AddWatchFailed;
+        const pz = std.mem.printSentinel(&zbuf, "{s}", .{path}, 0) catch return error.AddWatchFailed;
         const rc = linux.inotify_add_watch(fd, pz.ptr, watch_mask);
         if (sys.errno(rc) != .SUCCESS) return error.AddWatchFailed;
         return @intCast(rc);
@@ -193,7 +193,7 @@ test "processEvents: no data returns false" {
 
 test "processEvents: single IN_CLOSE_WRITE returns true, no rewatch" {
     var rewatched: ?i32 = null;
-    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 64;
+    var buf: [64]u8 align(@alignOf(linux.inotify_event)) = @splat(0);
     const ev: *linux.inotify_event = @ptrCast(&buf);
     ev.* = .{ .wd = 7, .mask = IN.CLOSE_WRITE, .cookie = 0, .len = 0 };
     _ = processEvents(&buf, @sizeOf(linux.inotify_event), *?i32, &rewatched, struct {
@@ -206,7 +206,7 @@ test "processEvents: single IN_CLOSE_WRITE returns true, no rewatch" {
 
 test "processEvents: IN_DELETE_SELF triggers callback" {
     var rewatched: ?i32 = null;
-    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 64;
+    var buf: [64]u8 align(@alignOf(linux.inotify_event)) = @splat(0);
     const ev: *linux.inotify_event = @ptrCast(&buf);
     ev.* = .{ .wd = 3, .mask = IN.DELETE_SELF, .cookie = 0, .len = 0 };
     _ = processEvents(&buf, @sizeOf(linux.inotify_event), *?i32, &rewatched, struct {
@@ -219,7 +219,7 @@ test "processEvents: IN_DELETE_SELF triggers callback" {
 
 test "processEvents: multiple events in one buffer" {
     var rewatch_count: usize = 0;
-    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 128;
+    var buf: [128]u8 align(@alignOf(linux.inotify_event)) = @splat(0);
     // Two events back-to-back.
     const ev1: *linux.inotify_event = @ptrCast(&buf[0]);
     ev1.* = .{ .wd = 1, .mask = IN.CLOSE_WRITE, .cookie = 0, .len = 0 };
@@ -236,7 +236,7 @@ test "processEvents: multiple events in one buffer" {
 
 test "processEvents: truncated last event is skipped" {
     var rewatched: ?i32 = null;
-    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 64;
+    var buf: [64]u8 align(@alignOf(linux.inotify_event)) = @splat(0);
     const ev: *linux.inotify_event = @ptrCast(&buf);
     ev.* = .{ .wd = 5, .mask = IN.IGNORED, .cookie = 0, .len = 0 };
     // Pass n smaller than a full event header.
@@ -251,7 +251,7 @@ test "processEvents: truncated last event is skipped" {
 test "processEvents: ev.len does not overflow past buffer" {
     var rewatch_count: usize = 0;
     // One event with an impossibly large name_len, then a real event.
-    var buf align(@alignOf(linux.inotify_event)) = [_]u8{0} ** 128;
+    var buf: [128]u8 align(@alignOf(linux.inotify_event)) = @splat(0);
     const ev1: *linux.inotify_event = @ptrCast(&buf[0]);
     ev1.* = .{ .wd = 1, .mask = IN.CLOSE_WRITE, .cookie = 0, .len = 65535 }; // huge len
     const n = @sizeOf(linux.inotify_event);

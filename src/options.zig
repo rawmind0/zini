@@ -46,15 +46,15 @@ pub const Config = struct {
     kill_process_group: u32 = 0,
     /// Counter (not bool): incremented by each `-w` flag.
     warn_on_reap: u32 = 0,
-    expect_status: std.StaticBitSet(256) = std.StaticBitSet(256).initEmpty(),
+    expect_status: std.StaticBitSet(256) = std.StaticBitSet(256).empty,
 
     // --- optional file-watch feature (off unless watch_count > 0) ---
     // SAFETY: only watch_paths[0..watch_count] is read, and watch_count starts at 0.
     watch_paths: [watcher.MAX_WATCHES][]const u8 = undefined,
     watch_count: usize = 0,
     on_change: OnChange = .restart,
-    stop_signal: u32 = @intFromEnum(SIG.TERM), // restart mode: graceful stop
-    reload_signal: u32 = @intFromEnum(SIG.HUP), // signal mode: reload
+    stop_signal: u32 = @backingInt(SIG.TERM), // restart mode: graceful stop
+    reload_signal: u32 = @backingInt(SIG.HUP), // signal mode: reload
     restart_grace_ms: u64 = 10_000, // restart mode: wait before SIGKILL
     debounce_ms: u64 = 200, // coalesce bursts of events
 
@@ -563,8 +563,8 @@ test "default Config values" {
     try testing.expectEqual(@as(u32, 0), cfg.warn_on_reap);
     try testing.expect(!cfg.watchEnabled());
     try testing.expectEqual(OnChange.restart, cfg.on_change);
-    try testing.expectEqual(@as(u32, @intFromEnum(SIG.TERM)), cfg.stop_signal);
-    try testing.expectEqual(@as(u32, @intFromEnum(SIG.HUP)), cfg.reload_signal);
+    try testing.expectEqual(@as(u32, @backingInt(SIG.TERM)), cfg.stop_signal);
+    try testing.expectEqual(@as(u32, @backingInt(SIG.HUP)), cfg.reload_signal);
     try testing.expectEqual(@as(u64, 10_000), cfg.restart_grace_ms);
     try testing.expectEqual(@as(u64, 200), cfg.debounce_ms);
 }

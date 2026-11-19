@@ -10,16 +10,17 @@
 set -eu
 
 IMAGE="${IMAGE:-zini-test}"
+DOCKER=${DOCKER:-docker}
 IDLE="${IDLE:-8}"
 NAME=zini-bench
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+${DOCKER} rm -f "$NAME" >/dev/null 2>&1 || true
 echo "running zini-debug (PID 1) supervising 'sleep', idling ${IDLE}s..."
-docker run -d --name "$NAME" --entrypoint /usr/local/bin/zini-debug \
+${DOCKER} run -d --name "$NAME" --entrypoint /usr/local/bin/zini-debug \
     "$IMAGE" -- sleep $((IDLE + 60)) >/dev/null
 sleep "$IDLE"
-docker stop "$NAME" >/dev/null 2>&1 || true
+${DOCKER} stop "$NAME" >/dev/null 2>&1 || true
 
 echo
-docker logs "$NAME" 2>&1 | sed -n '/PROF/,$p'
-docker rm "$NAME" >/dev/null 2>&1 || true
+${DOCKER} logs "$NAME" 2>&1 | sed -n '/PROF/,$p'
+${DOCKER} rm "$NAME" >/dev/null 2>&1 || true

@@ -9,6 +9,7 @@
 set -u
 
 IMAGE="${IMAGE:-zini-test}"
+DOCKER=${DOCKER:-docker}
 CLEAN=/scripts/child-clean.sh
 STUBBORN=/scripts/child-stubborn.sh
 fails=0
@@ -16,11 +17,11 @@ ok()   { printf '  ok   - %s\n' "$1"; }
 fail() { printf '  FAIL - %s\n' "$1"; fails=$((fails + 1)); }
 
 # run <name> <docker-run args...>   (detached; image + command are part of args)
-run()    { docker rm -f "$1" >/dev/null 2>&1 || true; name=$1; shift; docker run -d --name "$name" "$@" >/dev/null; }
-ex()     { docker exec "$1" sh -c "$2"; }
-starts() { docker logs "$1" 2>&1 | grep -c '^START'; }
-hups()   { docker logs "$1" 2>&1 | grep -c '^GOTHUP'; }
-clean()  { docker rm -f "$1" >/dev/null 2>&1 || true; }
+run()    { ${DOCKER} rm -f "$1" >/dev/null 2>&1 || true; name=$1; shift; ${DOCKER} run -d --name "$name" "$@" >/dev/null; }
+ex()     { ${DOCKER} exec "$1" sh -c "$2"; }
+starts() { ${DOCKER} logs "$1" 2>&1 | grep -c '^START'; }
+hups()   { ${DOCKER} logs "$1" 2>&1 | grep -c '^GOTHUP'; }
+clean()  { ${DOCKER} rm -f "$1" >/dev/null 2>&1 || true; }
 
 echo "zini file-watch tests"
 
@@ -50,7 +51,7 @@ s=$(starts w5); h=$(hups w5)
 
 # tini exit model: a child exiting on its own propagates even with watching on
 run w6 -e ZINI_WATCH=/fix/file "$IMAGE" /scripts/child-exit.sh 7
-rc=$(docker wait w6); [ "$rc" = "7" ] && ok "self-exit propagates, no respawn (exit $rc)" || fail "self-exit (exit $rc)"; clean w6
+rc=$(${DOCKER} wait w6); [ "$rc" = "7" ] && ok "self-exit propagates, no respawn (exit $rc)" || fail "self-exit (exit $rc)"; clean w6
 
 run w8 -e ZINI_WATCH=/fix/dir "$IMAGE" "$CLEAN"
 sleep 1; ex w8 'echo a > /fix/dir/file'; sleep 1

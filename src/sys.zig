@@ -49,7 +49,7 @@ pub const WaitError = error{WaitFailed};
 /// One non-blocking reap of any child. Returns null when there is nothing to
 /// reap right now (or no children remain).
 pub fn reapOne() WaitError!?Reaped {
-    var status: u32 = 0;
+    var status: i32 = 0;
     const rc = linux.wait4(-1, &status, linux.W.NOHANG, null);
     switch (errno(rc)) {
         .SUCCESS => {},
@@ -58,7 +58,7 @@ pub fn reapOne() WaitError!?Reaped {
     }
     const pid: pid_t = @intCast(rc);
     if (pid == 0) return null; // children exist but none ready
-    return .{ .pid = pid, .status = status };
+    return .{ .pid = pid, .status = @bitCast(status) };
 }
 
 pub const ExecResult = struct { status: u8, err: E };
@@ -84,7 +84,7 @@ pub fn execvp(
     var it = std.mem.splitScalar(u8, path_env, ':');
     while (it.next()) |dir0| {
         const dir = if (dir0.len == 0) "." else dir0;
-        const full = std.fmt.bufPrintZ(&pathbuf, "{s}/{s}", .{ dir, file }) catch continue;
+        const full = std.mem.printSentinel(&pathbuf, "{s}/{s}", .{ dir, file }, 0) catch continue;
         if (errno(linux.execve(full.ptr, argvZ, envpZ)) == .ACCES) got_eacces = true;
     }
 
